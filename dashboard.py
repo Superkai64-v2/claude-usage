@@ -1124,7 +1124,7 @@ function renderSessionsTable(sessions) {
     const sessionCell = s.session_name
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
-    return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}" onclick="selectSession('${esc(s.session_id_full)}')">
+    return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
@@ -1136,6 +1136,10 @@ function renderSessionsTable(sessions) {
       ${costCell}
     </tr>`;
   }).join('');
+  document.getElementById('sessions-body').addEventListener('click', function(e) {
+    const row = e.target.closest('tr.session-row');
+    if (row) selectSession(row.dataset.sessionId);
+  });
 }
 
 function setModelSort(col) {
