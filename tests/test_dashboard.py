@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from scanner import get_db, init_db, upsert_sessions, insert_turns
-from dashboard import get_dashboard_data, DashboardHandler, HTML_TEMPLATE
+from dashboard import get_dashboard_data, get_session_detail, DashboardHandler, HTML_TEMPLATE
 
 try:
     from http.server import HTTPServer
@@ -167,6 +167,46 @@ class TestSessionNameInDashboard(unittest.TestCase):
         session = data["sessions_all"][0]
         self.assertEqual(len(session["session_id"]), 8)
         self.assertEqual(session["session_id"], "named-se")
+
+
+class TestSessionDetail(unittest.TestCase):
+    """get_session_detail must return turn history, tool usage, and branch info."""
+
+    def setUp(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmpfile.close()
+        self.db_path = Path(self.tmpfile.name)
+        conn = get_db(self.db_path)
+        init_db(conn)
+        upsert_sessions(conn, [{
+            "session_id": "sess-abc123", "project_name": "user/myproject",
+            "first_timestamp": "2026-04-08T09:00:00Z",
+            "last_timestamp": "2026-04-08T10:00:00Z",
+            "git_branch": "main", "model": "claude-sonnet-4-6",
+            "total_input_tokens": 500, "total_output_tokens": 200,
+            "total_cache_read": 50, "total_cache_creation": 20,
+            "turn_count": 1,
+        }])
+        insert_turns(conn, [{
+            "session_id": "sess-abc123", "timestamp": "2026-04-08T09:30:00Z",
+            "model": "claude-sonnet-4-6", "input_tokens": 500,
+            "output_tokens": 200, "cache_read_tokens": 50,
+            "cache_creation_tokens": 20, "tool_name": "reply", "cwd": "/tmp",
+        }])
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_session_detail_includes_tools_and_cwds(self):
+        from dashboard import get_session_detail
+        detail = get_session_detail("sess-abc123", db_path=self.db_path)
+        self.assertEqual(detail["project"], "user/myproject")
+        self.assertEqual(detail["branch"], "main")
+        self.assertEqual(detail["tool_usage"][0]["tool_name"], "reply")
+        self.assertEqual(detail["cwd_usage"][0]["cwd"], "/tmp")
+        self.assertEqual(len(detail["turn_history"]), 1)
 
 
 class TestDashboardHTTP(unittest.TestCase):
