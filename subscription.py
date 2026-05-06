@@ -56,8 +56,13 @@ def resolve_budget(plan, custom_budget=None):
     return PLAN_BUDGETS.get(plan)
 
 
-def save_subscription_config(data, path=SUBSCRIPTION_PATH):
-    """Write config to disk. Creates parent dir if missing. Returns True on success."""
+def save_subscription_config(data, path=None):
+    """Write config to disk. Creates parent dir if missing. Returns True on success.
+
+    Resolves SUBSCRIPTION_PATH at call time (not def time) so tests that
+    monkey-patch the module attribute are honoured."""
+    if path is None:
+        path = SUBSCRIPTION_PATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -67,9 +72,13 @@ def save_subscription_config(data, path=SUBSCRIPTION_PATH):
         return False
 
 
-def load_subscription_config(path=SUBSCRIPTION_PATH):
+def load_subscription_config(path=None):
     """Load and validate the user's subscription config. Returns DEFAULT_CONFIG
-    when the file is missing/invalid so the dashboard always renders something."""
+    when the file is missing/invalid so the dashboard always renders something.
+
+    Resolves SUBSCRIPTION_PATH at call time so tests can monkey-patch."""
+    if path is None:
+        path = SUBSCRIPTION_PATH
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
