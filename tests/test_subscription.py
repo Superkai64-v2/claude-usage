@@ -1,47 +1,81 @@
-"""Tests for subscription.py — plan-preset resolution, config load/save, week window."""
+"""Tests for subscription.py — plan-price resolution, calendar-month window,
+config load/save with legacy migration, value-ratio + color buckets."""
 import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from subscription import (
-    DEFAULT_CONFIG, PLAN_BUDGETS, PLAN_LABELS,
+    DEFAULT_CONFIG, PLAN_PRICES, PLAN_LABELS,
     _is_valid_config,
-    calc_pace_ratio,
+    calc_value_ratio,
+    get_month_window,
     load_subscription_config,
-    pace_color,
-    resolve_budget,
+    resolve_price,
     save_subscription_config,
+    value_color,
 )
 
 
-class TestResolveBudget(unittest.TestCase):
+class TestResolvePrice(unittest.TestCase):
     def test_known_plans_return_published_rates(self):
-        self.assertEqual(resolve_budget("pro"), 25)
-        self.assertEqual(resolve_budget("pro-5x"), 125)
-        self.assertEqual(resolve_budget("max-5x"), 200)
-        self.assertEqual(resolve_budget("max-20x"), 800)
+        self.assertEqual(resolve_price("pro"), 20)
+        self.assertEqual(resolve_price("pro-5x"), 100)
+        self.assertEqual(resolve_price("max-5x"), 100)
+        self.assertEqual(resolve_price("max-20x"), 200)
 
-    def test_custom_plan_uses_user_supplied_budget(self):
-        self.assertEqual(resolve_budget("custom", 42), 42)
-        self.assertEqual(resolve_budget("custom", "150.5"), 150.5)
+    def test_custom_plan_uses_user_supplied_price(self):
+        self.assertEqual(resolve_price("custom", 42), 42)
+        self.assertEqual(resolve_price("custom", "150.5"), 150.5)
 
-    def test_custom_with_invalid_budget_returns_none(self):
-        self.assertIsNone(resolve_budget("custom", None))
-        self.assertIsNone(resolve_budget("custom", "not a number"))
+    def test_custom_with_invalid_price_returns_none(self):
+        self.assertIsNone(resolve_price("custom", None))
+        self.assertIsNone(resolve_price("custom", "not a number"))
 
     def test_negative_custom_clamped_to_zero(self):
-        self.assertEqual(resolve_budget("custom", -10), 0)
+        self.assertEqual(resolve_price("custom", -10), 0)
 
     def test_unknown_plan_returns_none(self):
-        self.assertIsNone(resolve_budget("ultra-premium"))
+        self.assertIsNone(resolve_price("ultra-premium"))
 
 
 class TestPlanLabelsCoverage(unittest.TestCase):
     def test_every_plan_has_a_label(self):
-        for k in PLAN_BUDGETS:
+        for k in PLAN_PRICES:
             self.assertIn(k, PLAN_LABELS)
+
+
+class TestGetMonthWindow(unittest.TestCase):
+    def test_first_day_at_midnight(self):
+        now = datetime(2026, 5, 15, 12, 30, tzinfo=ZoneInfo("UTC"))
+        start, end = get_month_window(now=now, tz="UTC")
+        self.assertEqual(start, datetime(2026, 5, 1, 0, 0, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(end,   datetime(2026, 6, 1, 0, 0, tzinfo=ZoneInfo("UTC")))
+
+    def test_december_rolls_into_january(self):
+        now = datetime(2026, 12, 25, tzinfo=ZoneInfo("UTC"))
+        start, end = get_month_window(now=now, tz="UTC")
+        self.assertEqual(start.year, 2026)
+        self.assertEqual(start.month, 12)
+        self.assertEqual(end.year,  2027)
+        self.assertEqual(end.month, 1)
+
+    def test_february_handles_leap_year(self):
+        now = datetime(2024, 2, 14, tzinfo=ZoneInfo("UTC"))
+        start, end = get_month_window(now=now, tz="UTC")
+        self.assertEqual(start, datetime(2024, 2, 1, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(end,   datetime(2024, 3, 1, tzinfo=ZoneInfo("UTC")))
+
+    def test_uses_provided_timezone(self):
+        # When tz=Europe/Oslo, "first of month at 00:00" should be in Oslo time.
+        now = datetime(2026, 5, 15, 23, 0, tzinfo=ZoneInfo("Europe/Oslo"))
+        start, end = get_month_window(now=now, tz="Europe/Oslo")
+        self.assertEqual(str(start.tzinfo), "Europe/Oslo")
+        self.assertEqual(start.month, 5)
+        self.assertEqual(start.day, 1)
 
 
 class TestSubscriptionConfigRoundtrip(unittest.TestCase):
@@ -57,12 +91,12 @@ class TestSubscriptionConfigRoundtrip(unittest.TestCase):
     def test_load_missing_returns_default(self):
         self.path.unlink()
         cfg = load_subscription_config(path=self.path)
-        self.assertEqual(cfg["plan"], DEFAULT_CONFIG["plan"])
+        self.assertEqual(cfg, DEFAULT_CONFIG)
 
     def test_load_invalid_json_returns_default(self):
         self.path.write_text("not json {", encoding="utf-8")
         cfg = load_subscription_config(path=self.path)
-        self.assertEqual(cfg["plan"], DEFAULT_CONFIG["plan"])
+        self.assertEqual(cfg, DEFAULT_CONFIG)
 
     def test_load_invalid_schema_returns_default(self):
         self.path.write_text(json.dumps({"plan": "max-5x"}), encoding="utf-8")
@@ -71,14 +105,28 @@ class TestSubscriptionConfigRoundtrip(unittest.TestCase):
         self.assertEqual(cfg, DEFAULT_CONFIG)
 
     def test_save_then_load_roundtrip(self):
-        new_cfg = {
-            "plan": "pro",
-            "weekly_budget_api_equivalent": 25,
-            "reset": {"timezone": "Europe/Oslo", "day": "Monday", "time": "00:00"},
-        }
+        new_cfg = {"plan": "pro", "monthly_price": 20, "timezone": "Europe/Oslo"}
         self.assertTrue(save_subscription_config(new_cfg, path=self.path))
         cfg = load_subscription_config(path=self.path)
         self.assertEqual(cfg, new_cfg)
+
+    def test_legacy_weekly_schema_migrates_to_monthly(self):
+        """A user with the old weekly schema (plan + weekly_budget + reset
+        block) should load cleanly under the new schema, with monthly_price
+        derived from the plan name."""
+        legacy = {
+            "plan": "max-20x",
+            "weekly_budget_api_equivalent": 800,
+            "reset": {"timezone": "Europe/Oslo", "day": "Monday", "time": "00:00"},
+        }
+        self.path.write_text(json.dumps(legacy), encoding="utf-8")
+        cfg = load_subscription_config(path=self.path)
+        self.assertEqual(cfg["plan"], "max-20x")
+        self.assertEqual(cfg["monthly_price"], 200)
+        self.assertEqual(cfg["timezone"], "Europe/Oslo")
+        # Legacy fields are dropped:
+        self.assertNotIn("weekly_budget_api_equivalent", cfg)
+        self.assertNotIn("reset", cfg)
 
 
 class TestIsValidConfig(unittest.TestCase):
@@ -86,65 +134,61 @@ class TestIsValidConfig(unittest.TestCase):
         self.assertTrue(_is_valid_config(DEFAULT_CONFIG))
 
     def test_invalid_timezone(self):
-        cfg = dict(DEFAULT_CONFIG)
-        cfg["reset"] = dict(DEFAULT_CONFIG["reset"], timezone="Mars/Olympus")
+        cfg = dict(DEFAULT_CONFIG, timezone="Mars/Olympus")
         self.assertFalse(_is_valid_config(cfg))
 
-    def test_invalid_day(self):
-        cfg = dict(DEFAULT_CONFIG)
-        cfg["reset"] = dict(DEFAULT_CONFIG["reset"], day="Funday")
+    def test_negative_price_rejected(self):
+        cfg = dict(DEFAULT_CONFIG, monthly_price=-1)
         self.assertFalse(_is_valid_config(cfg))
 
-    def test_invalid_time_format_rejected(self):
-        # Regression: a POST to /api/subscription/config with a malformed
-        # reset.time used to pass validation, get persisted to disk, then
-        # break get_week_window() (→ 500 loop on the gauge endpoint).
-        for bad in ("not-a-time", "25:00", "12:99", "12", "12:30:45", ""):
-            cfg = dict(DEFAULT_CONFIG)
-            cfg["reset"] = dict(DEFAULT_CONFIG["reset"], time=bad)
-            self.assertFalse(_is_valid_config(cfg), f"should reject time={bad!r}")
+    def test_unreasonable_price_rejected(self):
+        cfg = dict(DEFAULT_CONFIG, monthly_price=999999)
+        self.assertFalse(_is_valid_config(cfg))
 
-    def test_valid_time_formats_accepted(self):
-        for good in ("00:00", "23:59", "08:30"):
-            cfg = dict(DEFAULT_CONFIG)
-            cfg["reset"] = dict(DEFAULT_CONFIG["reset"], time=good)
-            self.assertTrue(_is_valid_config(cfg), f"should accept time={good!r}")
+    def test_non_numeric_price_rejected(self):
+        cfg = dict(DEFAULT_CONFIG, monthly_price="not a number")
+        self.assertFalse(_is_valid_config(cfg))
 
 
-class TestPaceRatio(unittest.TestCase):
+class TestValueRatio(unittest.TestCase):
+    def test_zero_when_no_price(self):
+        self.assertEqual(calc_value_ratio(50, 0), 0.0)
+
     def test_zero_when_no_cost(self):
-        self.assertEqual(calc_pace_ratio(0, 100, 0.5), 0.0)
+        self.assertEqual(calc_value_ratio(0, 100), 0.0)
 
-    def test_zero_when_no_budget(self):
-        self.assertEqual(calc_pace_ratio(50, 0, 0.5), 0.0)
+    def test_one_when_cost_equals_price(self):
+        self.assertAlmostEqual(calc_value_ratio(100, 100), 1.0)
 
-    def test_just_started_clamps_to_one(self):
-        # elapsed_fraction below ~1 hour → return 1.0 instead of an infinity spike
-        self.assertEqual(calc_pace_ratio(50, 100, 0.0001), 1.0)
+    def test_above_one_when_earned_out(self):
+        self.assertAlmostEqual(calc_value_ratio(300, 200), 1.5)
 
-    def test_on_pace_returns_one(self):
-        self.assertAlmostEqual(calc_pace_ratio(50, 100, 0.5), 1.0)
+    def test_below_one_when_underspent(self):
+        self.assertAlmostEqual(calc_value_ratio(50, 200), 0.25)
 
-    def test_overspending_returns_above_one(self):
-        # Spent 80 of 100 with only 50% of week elapsed → 80/(100*0.5) = 1.6
-        self.assertAlmostEqual(calc_pace_ratio(80, 100, 0.5), 1.6)
 
-    def test_color_buckets(self):
-        self.assertEqual(pace_color(0.5), "green")
-        self.assertEqual(pace_color(1.1), "green")
-        self.assertEqual(pace_color(1.3), "yellow")
-        self.assertEqual(pace_color(2.0), "red")
+class TestValueColor(unittest.TestCase):
+    def test_green_when_earned_out(self):
+        self.assertEqual(value_color(1.0, 0.5), "green")
+        self.assertEqual(value_color(2.0, 0.1), "green")
+
+    def test_gray_early_in_month(self):
+        self.assertEqual(value_color(0.3, 0.2), "gray")
+
+    def test_yellow_mid_month_behind(self):
+        self.assertEqual(value_color(0.6, 0.6), "yellow")
+
+    def test_red_late_month_underspent(self):
+        # Past 75% of month with under 75% value → won't earn out
+        self.assertEqual(value_color(0.5, 0.9), "red")
 
 
 class TestUpdateSubscriptionPlan(unittest.TestCase):
-    """Tests for the dashboard.update_subscription_plan write-validation surface."""
+    """Tests for dashboard.update_subscription_plan write-validation surface."""
 
     def setUp(self):
         from dashboard import update_subscription_plan
-        from subscription import SUBSCRIPTION_PATH
         self.update_plan = update_subscription_plan
-        self.original_path = SUBSCRIPTION_PATH
-        # Redirect SUBSCRIPTION_PATH to a tempfile so the user's real config is untouched.
         self.tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         self.tmp.close()
         import subscription as _sub
@@ -162,13 +206,13 @@ class TestUpdateSubscriptionPlan(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Unknown plan", err)
 
-    def test_rejects_custom_without_budget(self):
+    def test_rejects_custom_without_price(self):
         ok, err = self.update_plan(plan="custom")
         self.assertFalse(ok)
-        self.assertIn("Invalid custom budget", err)
+        self.assertIn("Invalid custom price", err)
 
-    def test_rejects_unreasonable_custom_budget(self):
-        ok, err = self.update_plan(plan="custom", custom_budget=999999)
+    def test_rejects_unreasonable_custom_price(self):
+        ok, err = self.update_plan(plan="custom", custom_price=999999)
         self.assertFalse(ok)
         self.assertIn("unreasonably large", err)
 

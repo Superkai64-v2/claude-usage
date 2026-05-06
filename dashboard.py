@@ -11,9 +11,9 @@ from pathlib import Path
 
 from pricing import PRICING, calc_cost
 from subscription import (
-    DEFAULT_CONFIG, PLAN_BUDGETS, PLAN_LABELS,
-    calc_pace_ratio, get_week_window, load_subscription_config, pace_color,
-    resolve_budget, save_subscription_config, _is_valid_config,
+    DEFAULT_CONFIG, PLAN_PRICES, PLAN_LABELS,
+    calc_value_ratio, get_month_window, load_subscription_config, value_color,
+    resolve_price, save_subscription_config, _is_valid_config,
 )
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -300,21 +300,24 @@ def get_session_detail(session_id, db_path=None):
 
 
 def get_subscription_data(db_path=None):
-    """Return current weekly budget state for the gauge:
-    {plan, plan_label, weekly_budget, cost_used, pace_ratio, color,
-     elapsed_fraction, week_start_iso, week_end_iso, reset}.
+    """Return current monthly value state for the gauge:
+    {plan, plan_label, monthly_price, cost_used, value_ratio, color,
+     elapsed_fraction, month_start_iso, month_end_iso, savings, deficit,
+     timezone}.
     Falls back to DEFAULT_CONFIG if no user config exists."""
     if db_path is None:
         db_path = DB_PATH
     cfg = load_subscription_config()
     plan = cfg.get("plan", "max-20x")
-    weekly_budget = cfg.get("weekly_budget_api_equivalent", 0) or 0
+    monthly_price = float(cfg.get("monthly_price", 0) or 0)
+    tz_name = cfg.get("timezone") or "UTC"
 
-    week_start, week_end = get_week_window(cfg["reset"])
-    now = datetime.now(week_start.tzinfo)
-    elapsed_fraction = (now - week_start).total_seconds() / max(
-        1, (week_end - week_start).total_seconds()
+    month_start, month_end = get_month_window(tz=tz_name)
+    now = datetime.now(month_start.tzinfo)
+    elapsed_fraction = (now - month_start).total_seconds() / max(
+        1, (month_end - month_start).total_seconds()
     )
+    elapsed_fraction = min(1.0, max(0.0, elapsed_fraction))
 
     cost_used = 0.0
     if db_path.exists():
@@ -324,8 +327,8 @@ def get_subscription_data(db_path=None):
             SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
             FROM turns
             WHERE timestamp >= ? AND timestamp < ?
-        """, (week_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              week_end.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"))).fetchall()
+        """, (month_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              month_end.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"))).fetchall()
         for r in rows:
             cost_used += calc_cost(
                 r["model"],
@@ -336,38 +339,40 @@ def get_subscription_data(db_path=None):
             )
         conn.close()
 
-    pace = calc_pace_ratio(cost_used, weekly_budget, elapsed_fraction)
+    value_ratio = calc_value_ratio(cost_used, monthly_price)
     return {
         "plan":             plan,
         "plan_label":       PLAN_LABELS.get(plan, plan),
-        "weekly_budget":    weekly_budget,
+        "monthly_price":    monthly_price,
         "cost_used":        round(cost_used, 2),
-        "pace_ratio":       round(pace, 3),
-        "color":            pace_color(pace),
+        "value_ratio":      round(value_ratio, 3),
+        "color":            value_color(value_ratio, elapsed_fraction),
         "elapsed_fraction": round(elapsed_fraction, 4),
-        "week_start_iso":   week_start.isoformat(),
-        "week_end_iso":     week_end.isoformat(),
-        "reset":            cfg["reset"],
+        "month_start_iso":  month_start.isoformat(),
+        "month_end_iso":    month_end.isoformat(),
+        "savings":          round(max(0.0, cost_used - monthly_price), 2),
+        "deficit":          round(max(0.0, monthly_price - cost_used), 2),
+        "timezone":         tz_name,
     }
 
 
 # Plan-config write surface — invoked by the GUI plan-switcher. Validates
-# input rigorously: only known plan keys, custom budget within sensible
+# input rigorously: only known plan keys, custom price within sensible
 # bounds. The endpoint is localhost-only (HTTPServer binds 127.0.0.1) but
 # we still don't want a malformed write to corrupt the config file.
-def update_subscription_plan(plan, custom_budget=None, reset=None):
+def update_subscription_plan(plan, custom_price=None, timezone=None):
     """Write a new plan to disk. Returns (ok, error_message_or_None)."""
-    if plan not in PLAN_BUDGETS:
+    if plan not in PLAN_PRICES:
         return False, f"Unknown plan: {plan}"
-    budget = resolve_budget(plan, custom_budget)
-    if budget is None:
-        return False, "Invalid custom budget (must be a non-negative number)"
-    if budget > 100000:  # sanity bound — no plan is anywhere near this
-        return False, "Custom budget unreasonably large"
+    price = resolve_price(plan, custom_price)
+    if price is None:
+        return False, "Invalid custom price (must be a non-negative number)"
+    if price > 100000:  # sanity bound
+        return False, "Custom price unreasonably large"
     new_cfg = {
         "plan": plan,
-        "weekly_budget_api_equivalent": budget,
-        "reset": reset or load_subscription_config().get("reset") or DEFAULT_CONFIG["reset"],
+        "monthly_price": price,
+        "timezone": timezone or load_subscription_config().get("timezone") or DEFAULT_CONFIG["timezone"],
     }
     if not _is_valid_config(new_cfg):
         return False, "Resulting config failed validation"
@@ -440,6 +445,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .gauge-pace.green  { background: rgba(74,222,128,0.18); color: #4ade80; }
   .gauge-pace.yellow { background: rgba(250,204,21,0.18); color: #facc15; }
   .gauge-pace.red    { background: rgba(248,113,113,0.18); color: #f87171; }
+  .gauge-pace.gray   { background: rgba(136,146,164,0.18); color: var(--muted); }
   .plan-select { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; cursor: pointer; }
   .plan-select:hover { border-color: var(--accent); }
   .plan-custom-input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; width: 80px; }
@@ -571,10 +577,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <path id="gauge-arc" d="M 10 70 A 50 50 0 0 1 110 70" stroke="#4ade80" stroke-width="10" fill="none" stroke-dasharray="0 200"/>
     </svg>
     <div class="gauge-info">
-      <div class="gauge-label">Weekly subscription budget</div>
-      <div class="gauge-value"><span id="gauge-cost">$0</span> / <span id="gauge-budget">$0</span></div>
-      <div class="gauge-sub"><span id="gauge-plan">—</span> · resets <span id="gauge-reset">—</span> · <span id="gauge-elapsed">—</span> through the week</div>
-      <span class="gauge-pace green" id="gauge-pace">on pace</span>
+      <div class="gauge-label" title="Sum of API-equivalent cost this calendar month vs subscription price. When cost exceeds price, the subscription is paying for itself.">Monthly API value vs subscription price</div>
+      <div class="gauge-value"><span id="gauge-cost">$0</span> / <span id="gauge-price">$0</span></div>
+      <div class="gauge-sub"><span id="gauge-plan">—</span> · <span id="gauge-elapsed">—</span> through the month</div>
+      <span class="gauge-pace gray" id="gauge-pace">—</span>
     </div>
   </div>
   <div class="stats-row" id="stats-row"></div>
@@ -1894,7 +1900,10 @@ function onThemeChange() {
   applyTheme(document.getElementById('theme-select').value);
 }
 
-// ── Subscription budget gauge + plan-switcher ──────────────────────────────
+// ── Subscription value gauge + plan-switcher ──────────────────────────────
+// "Has my API-equivalent usage this calendar month exceeded what I pay
+// for the subscription?" If yes → green (subscription is paying for
+// itself). If no and the month is mostly over → red. Mid-month → gray.
 let subscriptionPlans = [];
 
 async function loadSubscriptionConfig() {
@@ -1904,13 +1913,14 @@ async function loadSubscriptionConfig() {
     subscriptionPlans = cfg.available;
     const sel = document.getElementById('plan-select');
     sel.innerHTML = subscriptionPlans.map(p =>
-      `<option value="${esc(p.value)}">${esc(p.label)}${p.budget !== null ? ' ($' + p.budget + '/wk)' : ''}</option>`
+      `<option value="${esc(p.value)}">${esc(p.label)}${p.price !== null ? ' ($' + p.price + '/mo)' : ''}</option>`
     ).join('');
     sel.value = cfg.current.plan;
-    document.getElementById('plan-custom-input').style.display =
-      cfg.current.plan === 'custom' ? 'inline-block' : 'none';
+    const ci = document.getElementById('plan-custom-input');
+    ci.style.display = cfg.current.plan === 'custom' ? 'inline-block' : 'none';
+    ci.placeholder = '$/mo';
     if (cfg.current.plan === 'custom') {
-      document.getElementById('plan-custom-input').value = cfg.current.weekly_budget_api_equivalent || '';
+      ci.value = cfg.current.monthly_price || '';
     }
   } catch (e) { console.error('subscription/config failed', e); }
 }
@@ -1919,29 +1929,37 @@ async function loadSubscriptionGauge() {
   try {
     const resp = await fetch('/api/subscription');
     const d = await resp.json();
-    if (!d.weekly_budget) {
+    if (!d.monthly_price) {
       document.getElementById('gauge-card').style.display = 'none';
       return;
     }
     document.getElementById('gauge-card').style.display = 'flex';
     document.getElementById('gauge-cost').textContent = '$' + Number(d.cost_used).toLocaleString(undefined, {maximumFractionDigits:2});
-    document.getElementById('gauge-budget').textContent = '$' + Number(d.weekly_budget).toLocaleString();
+    document.getElementById('gauge-price').textContent = '$' + Number(d.monthly_price).toLocaleString();
     document.getElementById('gauge-plan').textContent = d.plan_label;
-    document.getElementById('gauge-reset').textContent = d.reset.day + ' ' + d.reset.time + ' ' + d.reset.timezone;
     document.getElementById('gauge-elapsed').textContent = Math.round(d.elapsed_fraction * 100) + '%';
-    // Arc: 200 unit perimeter (matching half-circle), pace ratio capped at 1.5 for visual.
-    const fillFraction = Math.min(1, d.cost_used / d.weekly_budget);
+
+    // Arc fills toward 100% of subscription price, then stays full at 100%
+    // (we don't keep growing the arc past full — instead the badge changes).
+    const fillFraction = Math.min(1, d.value_ratio);
     const arc = document.getElementById('gauge-arc');
     arc.setAttribute('stroke-dasharray', (fillFraction * 158) + ' 200');
-    const colorMap = { green: '#4ade80', yellow: '#facc15', red: '#f87171' };
-    arc.setAttribute('stroke', colorMap[d.color] || '#4ade80');
+    const colorMap = { green: '#4ade80', yellow: '#facc15', red: '#f87171', gray: '#8892a4' };
+    arc.setAttribute('stroke', colorMap[d.color] || '#8892a4');
+
     const paceEl = document.getElementById('gauge-pace');
     paceEl.className = 'gauge-pace ' + d.color;
-    paceEl.textContent = d.pace_ratio < 0.001 ? 'no spend yet'
-      : d.pace_ratio < 1.0 ? 'under pace (' + d.pace_ratio.toFixed(2) + '×)'
-      : d.pace_ratio < 1.2 ? 'on pace (' + d.pace_ratio.toFixed(2) + '×)'
-      : d.pace_ratio < 1.5 ? 'fast (' + d.pace_ratio.toFixed(2) + '×)'
-      : 'over budget (' + d.pace_ratio.toFixed(2) + '×)';
+    if (d.cost_used < 0.01) {
+      paceEl.textContent = 'no spend yet';
+    } else if (d.value_ratio >= 1.0) {
+      paceEl.textContent = `earning out (${d.value_ratio.toFixed(2)}× value, +$${d.savings.toFixed(0)} saved)`;
+    } else if (d.color === 'gray') {
+      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — too early to call (need $${d.deficit.toFixed(0)} more)`;
+    } else if (d.color === 'yellow') {
+      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — needs $${d.deficit.toFixed(0)} more by month-end`;
+    } else {
+      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — won't earn out at this rate ($${d.deficit.toFixed(0)} short)`;
+    }
   } catch (e) { console.error('subscription gauge failed', e); }
 }
 
@@ -1958,9 +1976,9 @@ async function onCustomBudgetChange() {
   await postPlan('custom', v);
 }
 
-async function postPlan(plan, customBudget) {
+async function postPlan(plan, customPrice) {
   try {
-    const body = customBudget !== undefined ? { plan, custom_budget: customBudget } : { plan };
+    const body = customPrice !== undefined ? { plan, custom_price: customPrice } : { plan };
     const resp = await fetch('/api/subscription/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2068,8 +2086,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             cfg = load_subscription_config()
             body = json.dumps({
                 "current": cfg,
-                "available": [{"value": k, "label": PLAN_LABELS[k], "budget": v}
-                              for k, v in PLAN_BUDGETS.items()],
+                "available": [{"value": k, "label": PLAN_LABELS[k], "price": v}
+                              for k, v in PLAN_PRICES.items()],
             }).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -2093,8 +2111,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers(); return
             ok, err = update_subscription_plan(
                 plan=payload.get("plan"),
-                custom_budget=payload.get("custom_budget"),
-                reset=payload.get("reset"),
+                custom_price=payload.get("custom_price"),
+                timezone=payload.get("timezone"),
             )
             body = json.dumps({"ok": ok, "error": err}).encode("utf-8")
             self.send_response(200 if ok else 400)

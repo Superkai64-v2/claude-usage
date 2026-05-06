@@ -1,28 +1,29 @@
 """
-subscription.py — Weekly budget tracking for subscription plans.
+subscription.py — Monthly value tracking for subscription plans.
 
-Computes weekly billing windows, plan-preset → API-equivalent budget,
-and pace ratios for the dashboard gauge.
+Tracks the question: "Has my API-equivalent usage this calendar month
+exceeded what I pay for the subscription?" If yes → the subscription is
+paying for itself; if no → I'd save money on the API directly.
 
 Config lives in ~/.claude/usage-subscription.json (user-data dir, NOT
 in the repo) so plan changes don't show up as commit noise.
 """
 
+import calendar
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 SUBSCRIPTION_PATH = Path.home() / ".claude" / "usage-subscription.json"
 
-# Anthropic plan → API-equivalent USD/week. Rates as of 2026-05-06; if
-# Anthropic changes plan caps these need updating. Numbers are derived
-# from public plan pages: monthly limits / 4.3 weeks rounded sensibly.
-PLAN_BUDGETS = {
-    "pro":      25,    # Claude Pro
-    "pro-5x":   125,   # Claude Pro 5x (legacy / promo tier)
-    "max-5x":   200,   # Claude Max 5x
-    "max-20x":  800,   # Claude Max 20x
+# Anthropic plan → published USD/month subscription price. Rates as of
+# 2026-05-06. If Anthropic changes plan pricing, update these.
+PLAN_PRICES = {
+    "pro":      20,    # Claude Pro
+    "pro-5x":   100,   # Claude Pro 5x (legacy / promo tier)
+    "max-5x":   100,   # Claude Max 5x
+    "max-20x":  200,   # Claude Max 20x
     "custom":   None,  # user-supplied number
 }
 
@@ -36,24 +37,22 @@ PLAN_LABELS = {
 
 DEFAULT_CONFIG = {
     "plan": "max-20x",
-    "weekly_budget_api_equivalent": 800,
-    "reset": {"timezone": "UTC", "day": "Monday", "time": "00:00"},
+    "monthly_price": 200,
+    "timezone": "UTC",
 }
 
-_REQUIRED_FIELDS = ("plan", "weekly_budget_api_equivalent", "reset")
-_REQUIRED_RESET_FIELDS = ("timezone", "day", "time")
-_VALID_DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_REQUIRED_FIELDS = ("plan", "monthly_price", "timezone")
 
 
-def resolve_budget(plan, custom_budget=None):
-    """Resolve a plan name to its weekly USD/week budget. `custom_budget` overrides
-    when plan == 'custom'. Returns None for unknown plans."""
+def resolve_price(plan, custom_price=None):
+    """Resolve a plan name to its USD/month price. `custom_price` overrides
+    when plan == 'custom'. Returns None for unknown plans / invalid custom."""
     if plan == "custom":
         try:
-            return max(0, float(custom_budget))
+            return max(0, float(custom_price))
         except (TypeError, ValueError):
             return None
-    return PLAN_BUDGETS.get(plan)
+    return PLAN_PRICES.get(plan)
 
 
 def save_subscription_config(data, path=None):
@@ -76,6 +75,10 @@ def load_subscription_config(path=None):
     """Load and validate the user's subscription config. Returns DEFAULT_CONFIG
     when the file is missing/invalid so the dashboard always renders something.
 
+    Migrates legacy weekly schema (plan + weekly_budget_api_equivalent + reset)
+    to the monthly schema by keeping the plan name and resolving its
+    monthly_price from PLAN_PRICES.
+
     Resolves SUBSCRIPTION_PATH at call time so tests can monkey-patch."""
     if path is None:
         path = SUBSCRIPTION_PATH
@@ -84,6 +87,21 @@ def load_subscription_config(path=None):
             data = json.load(f)
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return dict(DEFAULT_CONFIG)
+
+    if not isinstance(data, dict):
+        return dict(DEFAULT_CONFIG)
+
+    # Legacy migration: if 'weekly_budget_api_equivalent' or 'reset' are present
+    # but the new fields aren't, infer the new schema from the plan name.
+    if ("weekly_budget_api_equivalent" in data or "reset" in data) and "monthly_price" not in data:
+        plan = data.get("plan") or DEFAULT_CONFIG["plan"]
+        price = PLAN_PRICES.get(plan)
+        if price is None:
+            # Unknown plan in legacy data — fall back to default
+            return dict(DEFAULT_CONFIG)
+        # Preserve timezone if it was set, else use UTC
+        tz = (data.get("reset") or {}).get("timezone") or "UTC"
+        data = {"plan": plan, "monthly_price": price, "timezone": tz}
 
     if not _is_valid_config(data):
         return dict(DEFAULT_CONFIG)
@@ -95,88 +113,59 @@ def _is_valid_config(data):
         return False
     if any(data.get(k) is None for k in _REQUIRED_FIELDS):
         return False
-    reset = data.get("reset")
-    if not isinstance(reset, dict):
-        return False
-    if any(reset.get(k) is None for k in _REQUIRED_RESET_FIELDS):
-        return False
-    if reset["day"] not in _VALID_DAYS:
-        return False
     try:
-        ZoneInfo(reset["timezone"])
+        ZoneInfo(data["timezone"])
     except (KeyError, ValueError):
         return False
-    # Validate `time` ("HH:MM"). Without this, get_week_window() raises
-    # ValueError on the next read, locking the gauge into a 500-loop until
-    # the user manually edits ~/.claude/usage-subscription.json.
     try:
-        parts = str(reset["time"]).split(":")
-        if len(parts) != 2:
+        price = float(data["monthly_price"])
+        if price < 0 or price > 100000:
             return False
-        h, m = int(parts[0]), int(parts[1])
-        if not (0 <= h < 24 and 0 <= m < 60):
-            return False
-    except (ValueError, AttributeError):
+    except (ValueError, TypeError):
         return False
     return True
 
 
-def get_week_window(reset_cfg, now=None):
-    """Return (start, end) datetimes for the current billing week.
-
-    The week starts on reset_cfg['day'] at reset_cfg['time'] in the
-    configured timezone. If `now` falls exactly on the reset moment,
-    it's considered the start of a new week.
-    """
-    tz = ZoneInfo(reset_cfg["timezone"])
+def get_month_window(now=None, tz="UTC"):
+    """Return (start, end) datetimes for the current calendar month in
+    the given timezone. start = first of month at 00:00, end = first of
+    next month at 00:00 (exclusive)."""
+    zone = ZoneInfo(tz)
     if now is None:
-        now = datetime.now(tz)
+        now = datetime.now(zone)
     elif now.tzinfo is None:
-        now = now.replace(tzinfo=tz)
+        now = now.replace(tzinfo=zone)
 
-    hour, minute = map(int, reset_cfg["time"].split(":"))
-    target_weekday = _VALID_DAYS.index(reset_cfg["day"])  # Monday=0
-
-    # Find the most recent reset_day at reset_time that is <= now
-    # Start from today's date at the reset time
-    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    # Walk back to the correct weekday
-    days_since = (candidate.weekday() - target_weekday) % 7
-    candidate = candidate - timedelta(days=days_since)
-
-    # If candidate is in the future (we haven't reached reset time today
-    # and today is the reset day), go back one full week
-    if candidate > now:
-        candidate = candidate - timedelta(days=7)
-
-    start = candidate
-    end = start + timedelta(days=7)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Roll into next month
+    if now.month == 12:
+        end = start.replace(year=now.year + 1, month=1)
+    else:
+        end = start.replace(month=now.month + 1)
     return start, end
 
 
-# Elapsed fraction below this threshold (~1 hour of 168-hour week)
-# triggers "just started" clamping to avoid infinity/spike in pace ratio.
-_JUST_STARTED_THRESHOLD = 1.0 / 168.0  # ~0.00595
-
-
-def calc_pace_ratio(cost_used, weekly_budget, elapsed_fraction):
-    """Return pace ratio: actual_cost / expected_cost at this point in the week.
-
-    Returns 1.0 when elapsed_fraction < ~1 hour (just-started clamp).
-    Returns 0.0 when cost_used or weekly_budget is 0.
-    """
-    if weekly_budget <= 0 or cost_used <= 0:
+def calc_value_ratio(cost_used, monthly_price):
+    """Return value ratio: API-equivalent cost / subscription price.
+    >= 1.0 = subscription is paying for itself; < 1.0 = not yet.
+    Returns 0.0 when price <= 0 (custom misconfigured)."""
+    if monthly_price <= 0:
         return 0.0
-    if elapsed_fraction < _JUST_STARTED_THRESHOLD:
-        return 1.0
-    expected = weekly_budget * elapsed_fraction
-    return cost_used / expected
+    return cost_used / monthly_price
 
 
-def pace_color(ratio):
-    """Return color bucket based on pace ratio."""
-    if ratio < 1.2:
+def value_color(value_ratio, elapsed_fraction):
+    """Color bucket for the value gauge.
+
+    - green:  earned out (ratio >= 1.0)
+    - gray:   too early to call (month < 50% elapsed AND ratio < 1.0)
+    - yellow: behind pace (ratio < 1.0, month 50-75% elapsed)
+    - red:    will not earn out (ratio < 0.75 AND month > 75% elapsed)
+    """
+    if value_ratio >= 1.0:
         return "green"
-    if ratio < 1.5:
-        return "yellow"
-    return "red"
+    if elapsed_fraction < 0.5:
+        return "gray"
+    if elapsed_fraction > 0.75 and value_ratio < 0.75:
+        return "red"
+    return "yellow"
