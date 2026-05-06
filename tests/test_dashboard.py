@@ -150,6 +150,28 @@ class TestGetDashboardData(unittest.TestCase):
         for theme_id in ("default", "apple", "linear", "vercel", "notion", "stripe"):
             self.assertIn(f'"id": "{theme_id}"', html)
 
+    def test_sortProjectBranch_sorts_globally_not_grouped_by_project(self):
+        """Regression: sortProjectBranch used to sort by project name FIRST,
+        then by the chosen column — so 'Est. Cost descending' grouped rows
+        per project alphabetically and looked completely wrong (a $1230
+        MSP/develop row appeared BELOW a $57 MARKETING/main row because
+        'GAIN-MARKETING' < 'GAIN-MSP'). The fix: sort by chosen column,
+        project as tiebreaker only."""
+        body = HTML_TEMPLATE
+        # Find function body and assert it does NOT lead with the project comparison.
+        import re
+        m = re.search(r"function sortProjectBranch\(rows\)\s*\{(.*?)\n\}", body, re.DOTALL)
+        self.assertIsNotNone(m)
+        fn = m.group(1)
+        # The first compare must be on branchSortCol (the chosen column).
+        first_av = fn.index("a[branchSortCol]")
+        first_pa = fn.index("a.project")
+        self.assertLess(
+            first_av, first_pa,
+            "branchSortCol comparison must come BEFORE project tiebreaker; "
+            "otherwise project-grouping dominates and global sort breaks."
+        )
+
     def test_theme_override_style_comes_AFTER_main_style(self):
         """Regression: <style id='theme-override'> MUST come after the main
         <style> block. Otherwise the default :root in the main style wins

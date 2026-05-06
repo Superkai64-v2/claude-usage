@@ -1532,16 +1532,19 @@ function updateProjectBranchSortIcons() {
 }
 
 function sortProjectBranch(rows) {
+  // Sort globally by the chosen column. Earlier the project name was
+  // forced as the primary sort key, which grouped rows per project and
+  // made Est-Cost-descending look broken (high-cost MSP/develop appeared
+  // below low-cost MARKETING/main because alphabetical project ordering
+  // dominated). Project name only as tiebreaker now.
   return [...rows].sort((a, b) => {
-    const pa = (a.project || '').toLowerCase();
-    const pb = (b.project || '').toLowerCase();
-    if (pa < pb) return -1;
-    if (pa > pb) return 1;
     const av = a[branchSortCol] ?? 0;
     const bv = b[branchSortCol] ?? 0;
     if (av < bv) return branchSortDir === 'desc' ? 1 : -1;
     if (av > bv) return branchSortDir === 'desc' ? -1 : 1;
-    return 0;
+    const pa = (a.project || '').toLowerCase();
+    const pb = (b.project || '').toLowerCase();
+    return pa < pb ? -1 : pa > pb ? 1 : 0;
   });
 }
 
