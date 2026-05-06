@@ -357,18 +357,14 @@ def get_subscription_data(db_path=None):
 
 
 # Plan-config write surface — invoked by the GUI plan-switcher. Validates
-# input rigorously: only known plan keys, custom price within sensible
-# bounds. The endpoint is localhost-only (HTTPServer binds 127.0.0.1) but
-# we still don't want a malformed write to corrupt the config file.
-def update_subscription_plan(plan, custom_price=None, timezone=None):
+# input rigorously: only known plan keys. The endpoint is localhost-only
+# (HTTPServer binds 127.0.0.1) but we still don't want a malformed write
+# to corrupt the config file.
+def update_subscription_plan(plan, timezone=None):
     """Write a new plan to disk. Returns (ok, error_message_or_None)."""
     if plan not in PLAN_PRICES:
         return False, f"Unknown plan: {plan}"
-    price = resolve_price(plan, custom_price)
-    if price is None:
-        return False, "Invalid custom price (must be a non-negative number)"
-    if price > 100000:  # sanity bound
-        return False, "Custom price unreasonably large"
+    price = resolve_price(plan)
     new_cfg = {
         "plan": plan,
         "monthly_price": price,
@@ -448,7 +444,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .gauge-pace.gray   { background: rgba(136,146,164,0.18); color: var(--muted); }
   .plan-select { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; cursor: pointer; }
   .plan-select:hover { border-color: var(--accent); }
-  .plan-custom-input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; width: 80px; }
   header .header-controls { display: flex; align-items: center; gap: 8px; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
@@ -546,8 +541,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="meta" id="meta">Loading...</div>
   <div class="header-controls">
     <select id="theme-select" class="plan-select" onchange="onThemeChange()" title="UI theme — persists in localStorage"></select>
-    <select id="plan-select" class="plan-select" onchange="onPlanChange()" title="Subscription plan — sets the weekly budget for the gauge below"></select>
-    <input id="plan-custom-input" class="plan-custom-input" type="number" min="0" step="1" placeholder="$/wk" onchange="onCustomBudgetChange()" style="display:none">
+    <select id="plan-select" class="plan-select" onchange="onPlanChange()" title="Subscription plan — sets the monthly price the gauge compares against"></select>
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
   </div>
 </header>
@@ -1916,9 +1910,7 @@ async function loadSubscriptionConfig() {
     subscriptionPlans = cfg.available;
     const sel = document.getElementById('plan-select');
     sel.innerHTML = subscriptionPlans.map(p => {
-      const priceLabel = p.value === 'none'        ? ''
-                       : p.price === null          ? ''   // custom — input below
-                       : ' ($' + p.price + '/mo)';
+      const priceLabel = p.value === 'none' ? '' : ' ($' + p.price + '/mo)';
       return `<option value="${esc(p.value)}">${esc(p.label)}${priceLabel}</option>`;
     }).join('');
     sel.value = cfg.current.plan;
@@ -1927,12 +1919,6 @@ async function loadSubscriptionConfig() {
       monthly_price: Number(cfg.current.monthly_price) || 0,
       plan_label: (subscriptionPlans.find(p => p.value === cfg.current.plan) || {}).label || cfg.current.plan,
     };
-    const ci = document.getElementById('plan-custom-input');
-    ci.style.display = cfg.current.plan === 'custom' ? 'inline-block' : 'none';
-    ci.placeholder = '$/mo';
-    if (cfg.current.plan === 'custom') {
-      ci.value = cfg.current.monthly_price || '';
-    }
     // If data is already loaded, re-render the gauge with the (possibly
     // updated) plan baseline. Otherwise the next loadData → applyFilter will.
     if (rawData) applyFilter();
@@ -2033,25 +2019,15 @@ function updateGaugeForRange(costInRange, start, end) {
 }
 
 async function onPlanChange() {
-  const plan = document.getElementById('plan-select').value;
-  document.getElementById('plan-custom-input').style.display = plan === 'custom' ? 'inline-block' : 'none';
-  if (plan === 'custom') return;  // wait for the custom input
-  await postPlan(plan);
+  await postPlan(document.getElementById('plan-select').value);
 }
 
-async function onCustomBudgetChange() {
-  const v = parseFloat(document.getElementById('plan-custom-input').value);
-  if (!isFinite(v) || v < 0) return;
-  await postPlan('custom', v);
-}
-
-async function postPlan(plan, customPrice) {
+async function postPlan(plan) {
   try {
-    const body = customPrice !== undefined ? { plan, custom_price: customPrice } : { plan };
     const resp = await fetch('/api/subscription/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ plan }),
     });
     const d = await resp.json();
     if (!d.ok) {
@@ -2183,7 +2159,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers(); return
             ok, err = update_subscription_plan(
                 plan=payload.get("plan"),
-                custom_price=payload.get("custom_price"),
                 timezone=payload.get("timezone"),
             )
             body = json.dumps({"ok": ok, "error": err}).encode("utf-8")

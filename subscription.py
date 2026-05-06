@@ -25,7 +25,6 @@ PLAN_PRICES = {
     "pro-5x":   100,   # Claude Pro 5x (legacy / promo tier)
     "max-5x":   100,   # Claude Max 5x
     "max-20x":  200,   # Claude Max 20x
-    "custom":   None,  # user-supplied number
 }
 
 PLAN_LABELS = {
@@ -34,7 +33,6 @@ PLAN_LABELS = {
     "pro-5x":   "Pro 5×",
     "max-5x":   "Max 5×",
     "max-20x":  "Max 20×",
-    "custom":   "Custom",
 }
 
 DEFAULT_CONFIG = {
@@ -46,14 +44,8 @@ DEFAULT_CONFIG = {
 _REQUIRED_FIELDS = ("plan", "monthly_price", "timezone")
 
 
-def resolve_price(plan, custom_price=None):
-    """Resolve a plan name to its USD/month price. `custom_price` overrides
-    when plan == 'custom'. Returns None for unknown plans / invalid custom."""
-    if plan == "custom":
-        try:
-            return max(0, float(custom_price))
-        except (TypeError, ValueError):
-            return None
+def resolve_price(plan):
+    """Resolve a plan name to its USD/month price. Returns None for unknown plans."""
     return PLAN_PRICES.get(plan)
 
 

@@ -22,24 +22,15 @@ from subscription import (
 
 class TestResolvePrice(unittest.TestCase):
     def test_known_plans_return_published_rates(self):
+        self.assertEqual(resolve_price("none"), 0)
         self.assertEqual(resolve_price("pro"), 20)
         self.assertEqual(resolve_price("pro-5x"), 100)
         self.assertEqual(resolve_price("max-5x"), 100)
         self.assertEqual(resolve_price("max-20x"), 200)
 
-    def test_custom_plan_uses_user_supplied_price(self):
-        self.assertEqual(resolve_price("custom", 42), 42)
-        self.assertEqual(resolve_price("custom", "150.5"), 150.5)
-
-    def test_custom_with_invalid_price_returns_none(self):
-        self.assertIsNone(resolve_price("custom", None))
-        self.assertIsNone(resolve_price("custom", "not a number"))
-
-    def test_negative_custom_clamped_to_zero(self):
-        self.assertEqual(resolve_price("custom", -10), 0)
-
     def test_unknown_plan_returns_none(self):
         self.assertIsNone(resolve_price("ultra-premium"))
+        self.assertIsNone(resolve_price("custom"))  # 'custom' was removed
 
 
 class TestPlanLabelsCoverage(unittest.TestCase):
@@ -206,17 +197,17 @@ class TestUpdateSubscriptionPlan(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Unknown plan", err)
 
-    def test_rejects_custom_without_price(self):
+    def test_rejects_custom_plan_now_that_it_was_removed(self):
         ok, err = self.update_plan(plan="custom")
         self.assertFalse(ok)
-        self.assertIn("Invalid custom price", err)
-
-    def test_rejects_unreasonable_custom_price(self):
-        ok, err = self.update_plan(plan="custom", custom_price=999999)
-        self.assertFalse(ok)
-        self.assertIn("unreasonably large", err)
+        self.assertIn("Unknown plan", err)
 
     def test_writes_known_plan(self):
         ok, err = self.update_plan(plan="pro")
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+
+    def test_writes_none_plan(self):
+        ok, err = self.update_plan(plan="none")
         self.assertTrue(ok)
         self.assertIsNone(err)
