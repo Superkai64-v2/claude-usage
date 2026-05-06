@@ -19,6 +19,12 @@ SUBSCRIPTION_PATH = Path.home() / ".claude" / "usage-subscription.json"
 
 # Anthropic plan → published USD/month subscription price. Rates as of
 # 2026-05-06. If Anthropic changes plan pricing, update these.
+# Anthropic plan → published USD/month subscription price.
+# Rates as of 2026-05-06.
+# NOTE: Code with Claude keynote on 2026-05-06 announced doubling of usage
+# limits for all subscribers. Prices on this list reflect the published USD
+# subscription cost — re-verify against https://claude.com/pricing#api once
+# the doubling details are public. Most likely: prices unchanged, caps 2×.
 PLAN_PRICES = {
     "none":     0,     # No subscription — gauge shows API cost only, no comparison
     "pro":      20,    # Claude Pro
