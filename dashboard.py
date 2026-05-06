@@ -142,6 +142,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
 
+  #error-banner { position: fixed; top: 0; left: 0; right: 0; padding: 12px 24px; background: #7f1d1d; color: #fee2e2; font-size: 13px; z-index: 9999; border-bottom: 1px solid #f87171; }
+
   header { background: var(--card); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
   header h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
   header .meta { color: var(--muted); font-size: 12px; }
@@ -1246,7 +1248,6 @@ function showErrorBanner(e) {
   if (!banner) {
     banner = document.createElement('div');
     banner.id = 'error-banner';
-    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:12px 24px;background:#7f1d1d;color:#fee2e2;font-family:-apple-system,sans-serif;font-size:13px;z-index:9999;border-bottom:1px solid #f87171;';
     document.body.prepend(banner);
   }
   banner.textContent = 'Dashboard error: ' + (e?.message || String(e)) + ' (see browser console for stack trace)';

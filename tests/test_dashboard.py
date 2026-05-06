@@ -251,12 +251,15 @@ class TestHTMLTemplate(unittest.TestCase):
         Hard regression guard: the bare local getters MUST NOT appear in
         getRangeBounds — pull the function body out of the template and
         substring-check it."""
-        # Grab just the getRangeBounds body to scope the assertion tightly.
+        # Grab just the getRangeBounds body. Anchor the end on the next
+        # `function ` keyword (or `// ──` divider) rather than `^\}`, which
+        # would match the first column-0 closing brace and break under any
+        # reformatter that re-indents the inner blocks.
         import re
         m = re.search(
-            r"function getRangeBounds\(range\)\s*\{(.*?)^\}",
+            r"function getRangeBounds\(range\)\s*\{(.*?)\n\}\s*\n+function ",
             HTML_TEMPLATE,
-            re.DOTALL | re.MULTILINE,
+            re.DOTALL,
         )
         self.assertIsNotNone(m, "getRangeBounds function not found in template")
         body = m.group(1)
