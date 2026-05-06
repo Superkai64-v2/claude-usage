@@ -555,15 +555,25 @@ function modelPriority(m) {
 
 function readURLModels(allModels) {
   const param = new URLSearchParams(window.location.search).get('models');
-  if (!param) return new Set(allModels.filter(m => isBillable(m)));
+  if (!param) {
+    // Default = the billable subset, but fall back to all models when no model
+    // matches opus/sonnet/haiku (empty-string model values, "unknown", legacy
+    // IDs, third-party Claude proxies). Otherwise the dashboard renders blank
+    // because every filter predicate uses selectedModels.has(r.model).
+    const billable = allModels.filter(m => isBillable(m));
+    return new Set(billable.length > 0 ? billable : allModels);
+  }
   const fromURL = new Set(param.split(',').map(s => s.trim()).filter(Boolean));
   return new Set(allModels.filter(m => fromURL.has(m)));
 }
 
 function isDefaultModelSelection(allModels) {
+  // Mirror the readURLModels fallback so the URL serializer doesn't write
+  // ?models=... when the rendered selection IS the implicit default.
   const billable = allModels.filter(m => isBillable(m));
-  if (selectedModels.size !== billable.length) return false;
-  return billable.every(m => selectedModels.has(m));
+  const defaultSet = billable.length > 0 ? billable : allModels;
+  if (selectedModels.size !== defaultSet.length) return false;
+  return defaultSet.every(m => selectedModels.has(m));
 }
 
 function buildFilterUI(allModels) {
