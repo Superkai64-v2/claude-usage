@@ -235,6 +235,13 @@ class TestHTMLTemplate(unittest.TestCase):
         does not silently render blank."""
         self.assertIn("billable.length > 0 ? billable : allModels", HTML_TEMPLATE)
 
+    def test_loadData_surfaces_errors_via_banner(self):
+        """Regression for the diagnosis-difficulty pattern behind #74/76/88
+        /90/92/93/99/106: exceptions in loadData/applyFilter must be visible
+        in the DOM (an error-banner element), not console-only."""
+        self.assertIn("error-banner", HTML_TEMPLATE)
+        self.assertIn("showErrorBanner", HTML_TEMPLATE)
+
 
 class TestPricingParity(unittest.TestCase):
     """Verify CLI and dashboard pricing tables stay in sync."""
