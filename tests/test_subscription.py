@@ -95,6 +95,21 @@ class TestIsValidConfig(unittest.TestCase):
         cfg["reset"] = dict(DEFAULT_CONFIG["reset"], day="Funday")
         self.assertFalse(_is_valid_config(cfg))
 
+    def test_invalid_time_format_rejected(self):
+        # Regression: a POST to /api/subscription/config with a malformed
+        # reset.time used to pass validation, get persisted to disk, then
+        # break get_week_window() (→ 500 loop on the gauge endpoint).
+        for bad in ("not-a-time", "25:00", "12:99", "12", "12:30:45", ""):
+            cfg = dict(DEFAULT_CONFIG)
+            cfg["reset"] = dict(DEFAULT_CONFIG["reset"], time=bad)
+            self.assertFalse(_is_valid_config(cfg), f"should reject time={bad!r}")
+
+    def test_valid_time_formats_accepted(self):
+        for good in ("00:00", "23:59", "08:30"):
+            cfg = dict(DEFAULT_CONFIG)
+            cfg["reset"] = dict(DEFAULT_CONFIG["reset"], time=good)
+            self.assertTrue(_is_valid_config(cfg), f"should accept time={good!r}")
+
 
 class TestPaceRatio(unittest.TestCase):
     def test_zero_when_no_cost(self):

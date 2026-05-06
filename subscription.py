@@ -97,6 +97,18 @@ def _is_valid_config(data):
         ZoneInfo(reset["timezone"])
     except (KeyError, ValueError):
         return False
+    # Validate `time` ("HH:MM"). Without this, get_week_window() raises
+    # ValueError on the next read, locking the gauge into a 500-loop until
+    # the user manually edits ~/.claude/usage-subscription.json.
+    try:
+        parts = str(reset["time"]).split(":")
+        if len(parts) != 2:
+            return False
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h < 24 and 0 <= m < 60):
+            return False
+    except (ValueError, AttributeError):
+        return False
     return True
 
 
