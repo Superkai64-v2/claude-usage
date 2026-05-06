@@ -9,8 +9,14 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from pathlib import Path
 
-from pricing import PRICING
+from pricing import PRICING, calc_cost
+from subscription import (
+    DEFAULT_CONFIG, PLAN_BUDGETS, PLAN_LABELS,
+    calc_pace_ratio, get_week_window, load_subscription_config, pace_color,
+    resolve_budget, save_subscription_config, _is_valid_config,
+)
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlparse
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
@@ -259,6 +265,81 @@ def get_session_detail(session_id, db_path=DB_PATH):
     }
 
 
+def get_subscription_data(db_path=DB_PATH):
+    """Return current weekly budget state for the gauge:
+    {plan, plan_label, weekly_budget, cost_used, pace_ratio, color,
+     elapsed_fraction, week_start_iso, week_end_iso, reset}.
+    Falls back to DEFAULT_CONFIG if no user config exists."""
+    cfg = load_subscription_config()
+    plan = cfg.get("plan", "max-20x")
+    weekly_budget = cfg.get("weekly_budget_api_equivalent", 0) or 0
+
+    week_start, week_end = get_week_window(cfg["reset"])
+    now = datetime.now(week_start.tzinfo)
+    elapsed_fraction = (now - week_start).total_seconds() / max(
+        1, (week_end - week_start).total_seconds()
+    )
+
+    cost_used = 0.0
+    if db_path.exists():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+            FROM turns
+            WHERE timestamp >= ? AND timestamp < ?
+        """, (week_start.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              week_end.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ"))).fetchall()
+        for r in rows:
+            cost_used += calc_cost(
+                r["model"],
+                r["input_tokens"] or 0,
+                r["output_tokens"] or 0,
+                r["cache_read_tokens"] or 0,
+                r["cache_creation_tokens"] or 0,
+            )
+        conn.close()
+
+    pace = calc_pace_ratio(cost_used, weekly_budget, elapsed_fraction)
+    return {
+        "plan":             plan,
+        "plan_label":       PLAN_LABELS.get(plan, plan),
+        "weekly_budget":    weekly_budget,
+        "cost_used":        round(cost_used, 2),
+        "pace_ratio":       round(pace, 3),
+        "color":            pace_color(pace),
+        "elapsed_fraction": round(elapsed_fraction, 4),
+        "week_start_iso":   week_start.isoformat(),
+        "week_end_iso":     week_end.isoformat(),
+        "reset":            cfg["reset"],
+    }
+
+
+# Plan-config write surface — invoked by the GUI plan-switcher. Validates
+# input rigorously: only known plan keys, custom budget within sensible
+# bounds. The endpoint is localhost-only (HTTPServer binds 127.0.0.1) but
+# we still don't want a malformed write to corrupt the config file.
+def update_subscription_plan(plan, custom_budget=None, reset=None):
+    """Write a new plan to disk. Returns (ok, error_message_or_None)."""
+    if plan not in PLAN_BUDGETS:
+        return False, f"Unknown plan: {plan}"
+    budget = resolve_budget(plan, custom_budget)
+    if budget is None:
+        return False, "Invalid custom budget (must be a non-negative number)"
+    if budget > 100000:  # sanity bound — no plan is anywhere near this
+        return False, "Custom budget unreasonably large"
+    new_cfg = {
+        "plan": plan,
+        "weekly_budget_api_equivalent": budget,
+        "reset": reset or load_subscription_config().get("reset") or DEFAULT_CONFIG["reset"],
+    }
+    if not _is_valid_config(new_cfg):
+        return False, "Resulting config failed validation"
+    if not save_subscription_config(new_cfg):
+        return False, "Could not write config file"
+    return True, None
+
+
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -311,6 +392,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
   .stat-card .value { font-size: 22px; font-weight: 700; }
   .stat-card .sub { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  /* Subscription gauge — full-width card above the stats row */
+  .gauge-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 24px; }
+  .gauge-svg { flex-shrink: 0; width: 120px; height: 80px; }
+  .gauge-info { flex: 1; min-width: 0; }
+  .gauge-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .gauge-value { font-size: 22px; font-weight: 700; }
+  .gauge-sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .gauge-pace { font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-top: 6px; }
+  .gauge-pace.green  { background: rgba(74,222,128,0.18); color: #4ade80; }
+  .gauge-pace.yellow { background: rgba(250,204,21,0.18); color: #facc15; }
+  .gauge-pace.red    { background: rgba(248,113,113,0.18); color: #f87171; }
+  .plan-select { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .plan-select:hover { border-color: var(--accent); }
+  .plan-custom-input { background: var(--card); border: 1px solid var(--border); color: var(--text); padding: 4px 8px; border-radius: 6px; font-size: 12px; width: 80px; }
+  header .header-controls { display: flex; align-items: center; gap: 8px; }
 
   .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
   .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
@@ -382,7 +479,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <header>
   <h1>Claude Code Usage Dashboard</h1>
   <div class="meta" id="meta">Loading...</div>
-  <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+  <div class="header-controls">
+    <select id="plan-select" class="plan-select" onchange="onPlanChange()" title="Subscription plan — sets the weekly budget for the gauge below"></select>
+    <input id="plan-custom-input" class="plan-custom-input" type="number" min="0" step="1" placeholder="$/wk" onchange="onCustomBudgetChange()" style="display:none">
+    <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
+  </div>
 </header>
 
 <div id="filter-bar">
@@ -404,6 +505,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
+  <div class="gauge-card" id="gauge-card" style="display:none">
+    <svg class="gauge-svg" viewBox="0 0 120 80" id="gauge-svg">
+      <path d="M 10 70 A 50 50 0 0 1 110 70" stroke="var(--border)" stroke-width="10" fill="none"/>
+      <path id="gauge-arc" d="M 10 70 A 50 50 0 0 1 110 70" stroke="#4ade80" stroke-width="10" fill="none" stroke-dasharray="0 200"/>
+    </svg>
+    <div class="gauge-info">
+      <div class="gauge-label">Weekly subscription budget</div>
+      <div class="gauge-value"><span id="gauge-cost">$0</span> / <span id="gauge-budget">$0</span></div>
+      <div class="gauge-sub"><span id="gauge-plan">—</span> · resets <span id="gauge-reset">—</span> · <span id="gauge-elapsed">—</span> through the week</div>
+      <span class="gauge-pace green" id="gauge-pace">on pace</span>
+    </div>
+  </div>
   <div class="stats-row" id="stats-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
@@ -1597,7 +1710,89 @@ function scheduleAutoRefresh() {
   }
 }
 
+// ── Subscription budget gauge + plan-switcher ──────────────────────────────
+let subscriptionPlans = [];
+
+async function loadSubscriptionConfig() {
+  try {
+    const resp = await fetch('/api/subscription/config');
+    const cfg = await resp.json();
+    subscriptionPlans = cfg.available;
+    const sel = document.getElementById('plan-select');
+    sel.innerHTML = subscriptionPlans.map(p =>
+      `<option value="${esc(p.value)}">${esc(p.label)}${p.budget !== null ? ' ($' + p.budget + '/wk)' : ''}</option>`
+    ).join('');
+    sel.value = cfg.current.plan;
+    document.getElementById('plan-custom-input').style.display =
+      cfg.current.plan === 'custom' ? 'inline-block' : 'none';
+    if (cfg.current.plan === 'custom') {
+      document.getElementById('plan-custom-input').value = cfg.current.weekly_budget_api_equivalent || '';
+    }
+  } catch (e) { console.error('subscription/config failed', e); }
+}
+
+async function loadSubscriptionGauge() {
+  try {
+    const resp = await fetch('/api/subscription');
+    const d = await resp.json();
+    if (!d.weekly_budget) {
+      document.getElementById('gauge-card').style.display = 'none';
+      return;
+    }
+    document.getElementById('gauge-card').style.display = 'flex';
+    document.getElementById('gauge-cost').textContent = '$' + Number(d.cost_used).toLocaleString(undefined, {maximumFractionDigits:2});
+    document.getElementById('gauge-budget').textContent = '$' + Number(d.weekly_budget).toLocaleString();
+    document.getElementById('gauge-plan').textContent = d.plan_label;
+    document.getElementById('gauge-reset').textContent = d.reset.day + ' ' + d.reset.time + ' ' + d.reset.timezone;
+    document.getElementById('gauge-elapsed').textContent = Math.round(d.elapsed_fraction * 100) + '%';
+    // Arc: 200 unit perimeter (matching half-circle), pace ratio capped at 1.5 for visual.
+    const fillFraction = Math.min(1, d.cost_used / d.weekly_budget);
+    const arc = document.getElementById('gauge-arc');
+    arc.setAttribute('stroke-dasharray', (fillFraction * 158) + ' 200');
+    const colorMap = { green: '#4ade80', yellow: '#facc15', red: '#f87171' };
+    arc.setAttribute('stroke', colorMap[d.color] || '#4ade80');
+    const paceEl = document.getElementById('gauge-pace');
+    paceEl.className = 'gauge-pace ' + d.color;
+    paceEl.textContent = d.pace_ratio < 0.001 ? 'no spend yet'
+      : d.pace_ratio < 1.0 ? 'under pace (' + d.pace_ratio.toFixed(2) + '×)'
+      : d.pace_ratio < 1.2 ? 'on pace (' + d.pace_ratio.toFixed(2) + '×)'
+      : d.pace_ratio < 1.5 ? 'fast (' + d.pace_ratio.toFixed(2) + '×)'
+      : 'over budget (' + d.pace_ratio.toFixed(2) + '×)';
+  } catch (e) { console.error('subscription gauge failed', e); }
+}
+
+async function onPlanChange() {
+  const plan = document.getElementById('plan-select').value;
+  document.getElementById('plan-custom-input').style.display = plan === 'custom' ? 'inline-block' : 'none';
+  if (plan === 'custom') return;  // wait for the custom input
+  await postPlan(plan);
+}
+
+async function onCustomBudgetChange() {
+  const v = parseFloat(document.getElementById('plan-custom-input').value);
+  if (!isFinite(v) || v < 0) return;
+  await postPlan('custom', v);
+}
+
+async function postPlan(plan, customBudget) {
+  try {
+    const body = customBudget !== undefined ? { plan, custom_budget: customBudget } : { plan };
+    const resp = await fetch('/api/subscription/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await resp.json();
+    if (!d.ok) {
+      showErrorBanner(new Error('Plan update failed: ' + (d.error || 'unknown')));
+      return;
+    }
+    await loadSubscriptionGauge();
+  } catch (e) { showErrorBanner(e); }
+}
+
 loadData();
+loadSubscriptionConfig().then(loadSubscriptionGauge);
 scheduleAutoRefresh();
 </script>
 </body>
@@ -1653,12 +1848,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif parsed.path == "/api/subscription":
+            data = get_subscription_data()
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif parsed.path == "/api/subscription/config":
+            cfg = load_subscription_config()
+            body = json.dumps({
+                "current": cfg,
+                "available": [{"value": k, "label": PLAN_LABELS[k], "budget": v}
+                              for k, v in PLAN_BUDGETS.items()],
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/subscription/config":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length > 1024:  # plan-config is tiny — bound the body
+                self.send_response(413); self.end_headers(); return
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.send_response(400); self.end_headers(); return
+            ok, err = update_subscription_plan(
+                plan=payload.get("plan"),
+                custom_budget=payload.get("custom_budget"),
+                reset=payload.get("reset"),
+            )
+            body = json.dumps({"ok": ok, "error": err}).encode("utf-8")
+            self.send_response(200 if ok else 400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/rescan":
             # Full rebuild: delete DB and rescan from scratch.
             # Pass DB_PATH / DEFAULT_PROJECTS_DIRS explicitly so tests that
