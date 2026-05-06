@@ -312,6 +312,34 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn("error-banner", HTML_TEMPLATE)
         self.assertIn("showErrorBanner", HTML_TEMPLATE)
 
+    def test_getRangeBounds_uses_utc_throughout(self):
+        """Regression: getRangeBounds must use UTC arithmetic (getUTC*,
+        Date.UTC) so range boundaries align with the UTC dates the SQL
+        query emits. Using local-TZ getters (getDate, getMonth) inside the
+        function would shift month/week boundaries ±1 day for non-UTC users.
+
+        Hard regression guard: the bare local getters MUST NOT appear in
+        getRangeBounds — pull the function body out of the template and
+        substring-check it."""
+        # Grab just the getRangeBounds body to scope the assertion tightly.
+        import re
+        m = re.search(
+            r"function getRangeBounds\(range\)\s*\{(.*?)^\}",
+            HTML_TEMPLATE,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(m, "getRangeBounds function not found in template")
+        body = m.group(1)
+        # Must use UTC accessors:
+        self.assertIn("getUTCDate", body)
+        self.assertIn("getUTCMonth", body)
+        self.assertIn("Date.UTC", body)
+        # Must NOT use local-TZ accessors (the bug):
+        self.assertNotIn("today.getDate()", body)
+        self.assertNotIn("today.getMonth()", body)
+        self.assertNotIn("today.getFullYear()", body)
+        self.assertNotIn("today.getDay()", body)
+
 
 class TestPricingParity(unittest.TestCase):
     """Verify CLI and dashboard pricing tables stay in sync."""

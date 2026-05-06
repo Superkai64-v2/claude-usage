@@ -503,29 +503,34 @@ function rangeIncludesToday(range) {
 }
 
 function getRangeBounds(range) {
+  // The DB stores timestamps as UTC ISO; the SQL groups by substr(timestamp,1,10)
+  // which is the UTC date. Stay in UTC throughout this function so range
+  // boundaries align with the data — using local-TZ math (getDate, getMonth,
+  // Date(year,month,1) constructors) and then toISOString() shifts month/week
+  // boundaries by ±1 day for any user not in UTC.
   if (range === 'all') return { start: null, end: null };
-  const today = new Date();
+  const now = new Date();
+  const todayUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const iso = d => d.toISOString().slice(0, 10);
   if (range === 'week') {
-    const day = today.getDay();
+    const day = todayUTC.getUTCDay();
     const diffToMon = day === 0 ? 6 : day - 1;
-    const mon = new Date(today); mon.setDate(today.getDate() - diffToMon);
-    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    const mon = new Date(todayUTC); mon.setUTCDate(todayUTC.getUTCDate() - diffToMon);
+    const sun = new Date(mon); sun.setUTCDate(mon.getUTCDate() + 6);
     return { start: iso(mon), end: iso(sun) };
   }
   if (range === 'month') {
-    const start = new Date(today.getFullYear(), today.getMonth(), 1);
-    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const start = new Date(Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth(), 1));
+    const end   = new Date(Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth() + 1, 0));
     return { start: iso(start), end: iso(end) };
   }
   if (range === 'prev-month') {
-    const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-    const end = new Date(today.getFullYear(), today.getMonth(), 0);
+    const start = new Date(Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth() - 1, 1));
+    const end   = new Date(Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth(), 0));
     return { start: iso(start), end: iso(end) };
   }
   const days = range === '7d' ? 7 : range === '30d' ? 30 : 90;
-  const d = new Date();
-  d.setDate(d.getDate() - days);
+  const d = new Date(todayUTC); d.setUTCDate(todayUTC.getUTCDate() - days);
   return { start: iso(d), end: null };
 }
 
