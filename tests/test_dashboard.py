@@ -298,6 +298,13 @@ class TestHTMLTemplate(unittest.TestCase):
         self.assertIn('PEAK_HOURS_UTC', HTML_TEMPLATE)
         self.assertIn('[12, 13, 14, 15, 16, 17]', HTML_TEMPLATE)
 
+    def test_readURLModels_falls_back_to_all_when_billable_empty(self):
+        """Regression for #76: when no model name matches opus/sonnet/haiku
+        (empty-string, 'unknown', legacy IDs, third-party proxies), the
+        default selection must fall back to all models so the dashboard
+        does not silently render blank."""
+        self.assertIn("billable.length > 0 ? billable : allModels", HTML_TEMPLATE)
+
 
 class TestPricingParity(unittest.TestCase):
     """Verify CLI and dashboard pricing tables stay in sync."""
