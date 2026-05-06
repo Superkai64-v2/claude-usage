@@ -1269,6 +1269,11 @@ scheduleAutoRefresh();
 """
 
 
+# Encode the static HTML once at import time so each GET / doesn't re-encode
+# a 50KB string per request — relevant once the server is multi-threaded.
+_HTML_BYTES = HTML_TEMPLATE.encode("utf-8")
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -1278,7 +1283,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
+            self.wfile.write(_HTML_BYTES)
 
         elif self.path == "/api/data":
             data = get_dashboard_data()
