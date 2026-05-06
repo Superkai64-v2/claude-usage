@@ -131,13 +131,13 @@ class TestGetDashboardData(unittest.TestCase):
         self.assertIn("session_name", session)
         self.assertEqual(session["session_name"], "")
 
-    def test_tool_calls_by_day_present(self):
-        """tool_calls_by_day must be in the API response, list type."""
+    def test_skill_calls_by_day_present(self):
+        """skill_calls_by_day must be in the API response, list type."""
         data = get_dashboard_data(db_path=self.db_path)
-        self.assertIn("tool_calls_by_day", data)
-        self.assertIsInstance(data["tool_calls_by_day"], list)
-        # Both fixture turns have tool_name=None → no rows expected.
-        self.assertEqual(data["tool_calls_by_day"], [])
+        self.assertIn("skill_calls_by_day", data)
+        self.assertIsInstance(data["skill_calls_by_day"], list)
+        # Fixture turns have skill_name=None (default) → no rows expected.
+        self.assertEqual(data["skill_calls_by_day"], [])
 
     def test_themes_injected_into_html(self):
         """render_html() must inject all BUNDLED_THEMES so the JS dropdown
@@ -269,29 +269,21 @@ class TestSessionDetail(unittest.TestCase):
         self.assertEqual(detail["cwd_usage"][0]["cwd"], "/tmp")
         self.assertEqual(len(detail["turn_history"]), 1)
 
-    def test_tool_calls_by_day_aggregates_real_tool_usage(self):
+    def test_skill_calls_by_day_excludes_non_skill_tools(self):
+        """The fixture turn has tool_name='reply' (not a Skill invocation),
+        so skill_calls_by_day stays empty even though tool_name is set."""
         data = get_dashboard_data(db_path=self.db_path)
-        rows = data["tool_calls_by_day"]
-        self.assertEqual(len(rows), 1)
-        r = rows[0]
-        self.assertEqual(r["tool"], "reply")
-        self.assertEqual(r["turns"], 1)
-        self.assertEqual(r["input"], 500)
-        self.assertEqual(r["output"], 200)
+        self.assertEqual(data["skill_calls_by_day"], [])
 
-    def test_session_tool_breakdown_attached_to_sessions_all(self):
-        """Each sessions_all entry should carry a tool_breakdown list of
-        top-5 tools by token count, used by the Sessions-table 'Top Tools'
-        column and the Cost-by-Project aggregation."""
+    def test_session_skill_breakdown_attached_to_sessions_all(self):
+        """Each sessions_all entry should carry a skill_breakdown list of
+        top-5 skills by token count, used by the Sessions-table 'Top Skills'
+        column and the Cost-by-Project aggregation. Empty for the fixture
+        because skill_name=None on all turns (no Skill tool invoked)."""
         data = get_dashboard_data(db_path=self.db_path)
         s = data["sessions_all"][0]
-        self.assertIn("tool_breakdown", s)
-        self.assertEqual(len(s["tool_breakdown"]), 1)
-        t = s["tool_breakdown"][0]
-        self.assertEqual(t["tool"], "reply")
-        self.assertEqual(t["turns"], 1)
-        # tokens = input + output + cache_read + cache_creation = 500+200+50+20
-        self.assertEqual(t["tokens"], 770)
+        self.assertIn("skill_breakdown", s)
+        self.assertEqual(s["skill_breakdown"], [])
 
     def test_session_detail_token_values(self):
         detail = get_session_detail("sess-abc123", db_path=self.db_path)
@@ -346,8 +338,8 @@ class TestSessionDetail(unittest.TestCase):
         self.assertIn("2026-04-08", session["first"])
 
 
-class TestToolBreakdownTopFive(unittest.TestCase):
-    """tool_breakdown is trimmed to top 5 tools per session by tokens."""
+class TestSkillBreakdownTopFive(unittest.TestCase):
+    """skill_breakdown is trimmed to top 5 skills per session by tokens."""
 
     def setUp(self):
         self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -364,11 +356,12 @@ class TestToolBreakdownTopFive(unittest.TestCase):
             "total_cache_read": 0, "total_cache_creation": 0,
             "turn_count": 7,
         }])
-        # 7 different tools, each with distinct token counts so ordering is unambiguous
+        # 7 different skills, each with distinct token counts so ordering is unambiguous
         turns = []
-        for i, (tool, tokens) in enumerate([
-            ("Bash", 1000), ("Edit", 800), ("Read", 600), ("Grep", 400),
-            ("Write", 200), ("Glob", 50), ("Skill", 25),
+        for i, (skill, tokens) in enumerate([
+            ("simplify", 1000), ("browser-test-playwright", 800),
+            ("massive-parallel-planning", 600), ("review", 400),
+            ("security-review", 200), ("loop", 50), ("schedule", 25),
         ]):
             turns.append({
                 "session_id": "sess-multi",
@@ -376,7 +369,7 @@ class TestToolBreakdownTopFive(unittest.TestCase):
                 "model": "claude-sonnet-4-6",
                 "input_tokens": tokens, "output_tokens": 0,
                 "cache_read_tokens": 0, "cache_creation_tokens": 0,
-                "tool_name": tool, "cwd": "/tmp",
+                "tool_name": "Skill", "skill_name": skill, "cwd": "/tmp",
             })
         insert_turns(conn, turns)
         conn.commit(); conn.close()
@@ -387,10 +380,13 @@ class TestToolBreakdownTopFive(unittest.TestCase):
     def test_breakdown_capped_at_5_and_sorted_descending(self):
         data = get_dashboard_data(db_path=self.db_path)
         s = data["sessions_all"][0]
-        bd = s["tool_breakdown"]
+        bd = s["skill_breakdown"]
         self.assertEqual(len(bd), 5)
-        self.assertEqual([t["tool"] for t in bd], ["Bash", "Edit", "Read", "Grep", "Write"])
-        # Glob (50) and Skill (25) are correctly excluded.
+        self.assertEqual(
+            [t["skill"] for t in bd],
+            ["simplify", "browser-test-playwright", "massive-parallel-planning", "review", "security-review"],
+        )
+        # loop (50) and schedule (25) are correctly excluded.
 
 
 class TestDashboardHTTP(unittest.TestCase):

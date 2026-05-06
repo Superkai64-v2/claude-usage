@@ -67,6 +67,7 @@ def init_db(conn):
             cache_read_tokens       INTEGER DEFAULT 0,
             cache_creation_tokens   INTEGER DEFAULT 0,
             tool_name               TEXT,
+            skill_name              TEXT,
             cwd                     TEXT,
             message_id              TEXT
         );
@@ -91,6 +92,13 @@ def init_db(conn):
         conn.execute("SELECT session_name FROM sessions LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE sessions ADD COLUMN session_name TEXT")
+    # Add skill_name column if upgrading from older schema. Captures the
+    # actual skill invoked when tool_name == 'Skill' (the Skill tool's
+    # input.skill field, e.g. 'massive-parallel-planning' / 'simplify').
+    try:
+        conn.execute("SELECT skill_name FROM turns LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE turns ADD COLUMN skill_name TEXT")
     # Conditional unique index: only dedup non-null message IDs
     conn.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_message_id
@@ -214,11 +222,22 @@ def parse_jsonl_file(filepath):
                     if input_tokens + output_tokens + cache_read + cache_creation == 0:
                         continue
 
-                    # Extract tool name from content if present
+                    # Extract tool name from content if present. When the
+                    # tool_use is Claude Code's `Skill` tool, also pull the
+                    # actual skill name out of input.skill — that's the
+                    # name we want to surface in stats (e.g. 'simplify',
+                    # 'browser-test-playwright'), not the literal "Skill".
                     tool_name = None
+                    skill_name = None
                     for item in msg.get("content", []):
                         if isinstance(item, dict) and item.get("type") == "tool_use":
                             tool_name = item.get("name")
+                            if tool_name == "Skill":
+                                inp = item.get("input") or {}
+                                if isinstance(inp, dict):
+                                    sk = inp.get("skill")
+                                    if isinstance(sk, str) and sk.strip():
+                                        skill_name = sk.strip()
                             break
 
                     if model:
@@ -233,6 +252,7 @@ def parse_jsonl_file(filepath):
                         "cache_read_tokens": cache_read,
                         "cache_creation_tokens": cache_creation,
                         "tool_name": tool_name,
+                        "skill_name": skill_name,
                         "cwd": cwd,
                         "message_id": message_id,
                     }
@@ -360,13 +380,13 @@ def insert_turns(conn, turns):
     conn.executemany("""
         INSERT OR REPLACE INTO turns
             (session_id, timestamp, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_creation_tokens, tool_name, cwd, message_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             cache_read_tokens, cache_creation_tokens, tool_name, skill_name, cwd, message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         (t["session_id"], t["timestamp"], t["model"],
          t["input_tokens"], t["output_tokens"],
          t["cache_read_tokens"], t["cache_creation_tokens"],
-         t["tool_name"], t["cwd"], t.get("message_id", ""))
+         t["tool_name"], t.get("skill_name"), t["cwd"], t.get("message_id", ""))
         for t in turns
     ])
 

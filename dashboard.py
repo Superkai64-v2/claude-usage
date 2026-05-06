@@ -22,7 +22,10 @@ from urllib.parse import parse_qs, urlparse
 DB_PATH = Path.home() / ".claude" / "usage.db"
 
 
-def get_dashboard_data(db_path=DB_PATH):
+def get_dashboard_data(db_path=None):
+    # Resolve at call time so tests that monkey-patch dashboard.DB_PATH are honoured.
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
 
@@ -86,57 +89,59 @@ def get_dashboard_data(db_path=DB_PATH):
         "turns":  r["turns"] or 0,
     } for r in hourly_rows]
 
-    # ── Tool-call usage per day per model (client filters by range + model) ───
-    # Cowork sessions don't carry tool_name (cowork.py stores None) so they're
-    # silently excluded — document this in the table caption.
-    tool_rows = conn.execute("""
+    # ── Skill-call usage per day per model (client filters by range + model) ──
+    # Cowork sessions don't carry skill_name (cowork.py stores None) so they're
+    # silently excluded — documented in the table caption.
+    # skill_name is populated by scanner.py only when tool_use.name == 'Skill',
+    # extracting input.skill (the actual skill, e.g. 'simplify' / 'browser-test').
+    skill_rows = conn.execute("""
         SELECT
             substr(timestamp, 1, 10)   as day,
             COALESCE(model, 'unknown') as model,
-            tool_name                  as tool,
+            skill_name                 as skill,
             COUNT(*)                   as turns,
             SUM(input_tokens)          as input,
             SUM(output_tokens)         as output
         FROM turns
-        WHERE tool_name IS NOT NULL AND tool_name != ''
-        GROUP BY day, model, tool
-        ORDER BY day, model, tool
+        WHERE skill_name IS NOT NULL AND skill_name != ''
+        GROUP BY day, model, skill
+        ORDER BY day, model, skill
     """).fetchall()
 
-    tool_calls_by_day = [{
+    skill_calls_by_day = [{
         "day":    r["day"],
         "model":  r["model"],
-        "tool":   r["tool"],
+        "skill":  r["skill"],
         "turns":  r["turns"] or 0,
         "input":  r["input"] or 0,
         "output": r["output"] or 0,
-    } for r in tool_rows]
+    } for r in skill_rows]
 
-    # ── Per-session tool breakdown (top 5 tools per session) ──────────────────
-    # Used for both the Sessions-table "Top Tools" column and the Cost-by-
+    # ── Per-session skill breakdown (top 5 skills per session) ────────────────
+    # Used for both the Sessions-table "Top Skills" column and the Cost-by-
     # Project aggregation (JS rolls these up by project in applyFilter).
-    per_session_tool_rows = conn.execute("""
+    per_session_skill_rows = conn.execute("""
         SELECT
             session_id,
-            tool_name as tool,
+            skill_name as skill,
             COUNT(*) as turns,
             SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) as tokens
         FROM turns
-        WHERE tool_name IS NOT NULL AND tool_name != ''
-        GROUP BY session_id, tool_name
+        WHERE skill_name IS NOT NULL AND skill_name != ''
+        GROUP BY session_id, skill_name
     """).fetchall()
-    tool_breakdown_by_session = {}
-    for r in per_session_tool_rows:
+    skill_breakdown_by_session = {}
+    for r in per_session_skill_rows:
         sid = r["session_id"]
-        tool_breakdown_by_session.setdefault(sid, []).append({
-            "tool":   r["tool"],
+        skill_breakdown_by_session.setdefault(sid, []).append({
+            "skill":  r["skill"],
             "turns":  r["turns"] or 0,
             "tokens": r["tokens"] or 0,
         })
     # Trim to top 5 per session, sorted by tokens descending
-    for sid, tools in tool_breakdown_by_session.items():
-        tools.sort(key=lambda t: -t["tokens"])
-        tool_breakdown_by_session[sid] = tools[:5]
+    for sid, skills in skill_breakdown_by_session.items():
+        skills.sort(key=lambda t: -t["tokens"])
+        skill_breakdown_by_session[sid] = skills[:5]
 
     # ── All sessions (client filters by range and model) ──────────────────────
     # session_name may be missing on older DB schemas; fall back gracefully.
@@ -174,7 +179,7 @@ def get_dashboard_data(db_path=DB_PATH):
             "session_id":    r["session_id"][:8],
             "session_id_full": r["session_id"],
             "session_name":  r["session_name"] or "",
-            "tool_breakdown": tool_breakdown_by_session.get(r["session_id"], []),
+            "skill_breakdown": skill_breakdown_by_session.get(r["session_id"], []),
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
             "first":         (r["first_timestamp"] or "")[:16].replace("T", " "),
@@ -192,16 +197,18 @@ def get_dashboard_data(db_path=DB_PATH):
     conn.close()
 
     return {
-        "all_models":        all_models,
-        "daily_by_model":    daily_by_model,
-        "hourly_by_model":   hourly_by_model,
-        "tool_calls_by_day": tool_calls_by_day,
-        "sessions_all":      sessions_all,
-        "generated_at":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":         all_models,
+        "daily_by_model":     daily_by_model,
+        "hourly_by_model":    hourly_by_model,
+        "skill_calls_by_day": skill_calls_by_day,
+        "sessions_all":       sessions_all,
+        "generated_at":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
-def get_session_detail(session_id, db_path=DB_PATH):
+def get_session_detail(session_id, db_path=None):
+    if db_path is None:
+        db_path = DB_PATH
     if not db_path.exists():
         return {"error": "Database not found. Run: python cli.py scan"}
 
@@ -292,11 +299,13 @@ def get_session_detail(session_id, db_path=DB_PATH):
     }
 
 
-def get_subscription_data(db_path=DB_PATH):
+def get_subscription_data(db_path=None):
     """Return current weekly budget state for the gauge:
     {plan, plan_label, weekly_budget, cost_used, pace_ratio, color,
      elapsed_fraction, week_start_iso, week_end_iso, reset}.
     Falls back to DEFAULT_CONFIG if no user config exists."""
+    if db_path is None:
+        db_path = DB_PATH
     cfg = load_subscription_config()
     plan = cfg.get("plan", "max-20x")
     weekly_budget = cfg.get("weekly_budget_api_equivalent", 0) or 0
@@ -597,7 +606,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="chart-wrap"><canvas id="chart-project"></canvas></div>
     </div>
     <div class="chart-card wide">
-      <h2 id="tool-trend-title">Tool Usage Over Time</h2>
+      <h2 id="tool-trend-title">Skill Usage Over Time</h2>
       <div class="chart-wrap tall"><canvas id="chart-tool-trend"></canvas></div>
     </div>
   </div>
@@ -626,7 +635,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th class="sortable" onclick="setSessionSort('last')">Last Active <span class="sort-icon" id="sort-icon-last"></span></th>
         <th class="sortable" onclick="setSessionSort('duration_min')">Duration <span class="sort-icon" id="sort-icon-duration_min"></span></th>
         <th>Model</th>
-        <th>Top Tools</th>
+        <th>Top Skills</th>
         <th class="sortable" onclick="setSessionSort('turns')">Turns <span class="sort-icon" id="sort-icon-turns"></span></th>
         <th class="sortable" onclick="setSessionSort('input')">Input <span class="sort-icon" id="sort-icon-input"></span></th>
         <th class="sortable" onclick="setSessionSort('output')">Output <span class="sort-icon" id="sort-icon-output"></span></th>
@@ -644,7 +653,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>Project</th>
-        <th>Top Tools</th>
+        <th>Top Skills</th>
         <th class="sortable" onclick="setProjectSort('sessions')">Sessions <span class="sort-icon" id="psort-sessions"></span></th>
         <th class="sortable" onclick="setProjectSort('turns')">Turns <span class="sort-icon" id="psort-turns"></span></th>
         <th class="sortable" onclick="setProjectSort('input')">Input <span class="sort-icon" id="psort-input"></span></th>
@@ -670,15 +679,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-header"><div class="section-title">Tool Calls (across selected range)</div><button class="export-btn" onclick="exportToolCallsCSV()" title="Export tool-call breakdown to CSV">&#x2913; CSV</button></div>
-    <p class="muted" style="font-size:11px;margin:0 0 8px 0">Aggregated across all sessions in the selected time window. Cowork sessions are excluded (audit logs don't carry tool data).</p>
+    <div class="section-header"><div class="section-title">Skill Calls (across selected range)</div><button class="export-btn" onclick="exportSkillCallsCSV()" title="Export skill-call breakdown to CSV">&#x2913; CSV</button></div>
+    <p class="muted" style="font-size:11px;margin:0 0 8px 0">Aggregated invocations of the <code>Skill</code> tool across all sessions in the selected window (extracted from <code>input.skill</code>). Cowork sessions are excluded (audit logs don't carry skill data).</p>
     <table>
       <thead><tr>
-        <th>Tool</th>
+        <th>Skill</th>
         <th>Model</th>
-        <th class="sortable" onclick="setToolCallSort('turns')">Turns <span class="sort-icon" id="tcsort-turns"></span></th>
-        <th class="sortable" onclick="setToolCallSort('input')">Input <span class="sort-icon" id="tcsort-input"></span></th>
-        <th class="sortable" onclick="setToolCallSort('output')">Output <span class="sort-icon" id="tcsort-output"></span></th>
+        <th class="sortable" onclick="setSkillCallSort('turns')">Turns <span class="sort-icon" id="tcsort-turns"></span></th>
+        <th class="sortable" onclick="setSkillCallSort('input')">Input <span class="sort-icon" id="tcsort-input"></span></th>
+        <th class="sortable" onclick="setSkillCallSort('output')">Output <span class="sort-icon" id="tcsort-output"></span></th>
       </tr></thead>
       <tbody id="tool-calls-body"></tbody>
     </table>
@@ -722,9 +731,9 @@ let branchSortDir = 'desc';
 let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
-let lastToolCalls = [];
-let toolCallSortCol = 'turns';
-let toolCallSortDir = 'desc';
+let lastSkillCalls = [];
+let skillCallSortCol = 'turns';
+let skillCallSortDir = 'desc';
 let sessionSortDir = 'desc';
 let hourlyTZ = 'local';  // 'local' or 'utc'
 
@@ -1063,10 +1072,10 @@ function applyFilter() {
   const byModel = Object.values(modelMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
   // By project: aggregate from filtered sessions, including per-project
-  // tool breakdown rolled up from each session's tool_breakdown.
+  // skill breakdown rolled up from each session's skill_breakdown.
   const projMap = {};
   for (const s of filteredSessions) {
-    if (!projMap[s.project]) projMap[s.project] = { project: s.project, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0, cost: 0, tool_totals: {} };
+    if (!projMap[s.project]) projMap[s.project] = { project: s.project, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0, cost: 0, skill_totals: {} };
     const p = projMap[s.project];
     p.input          += s.input;
     p.output         += s.output;
@@ -1075,16 +1084,16 @@ function applyFilter() {
     p.turns          += s.turns;
     p.sessions++;
     p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
-    for (const t of (s.tool_breakdown || [])) {
-      if (!p.tool_totals[t.tool]) p.tool_totals[t.tool] = { tool: t.tool, tokens: 0, turns: 0 };
-      p.tool_totals[t.tool].tokens += t.tokens;
-      p.tool_totals[t.tool].turns  += t.turns;
+    for (const t of (s.skill_breakdown || [])) {
+      if (!p.skill_totals[t.skill]) p.skill_totals[t.skill] = { skill: t.skill, tokens: 0, turns: 0 };
+      p.skill_totals[t.skill].tokens += t.tokens;
+      p.skill_totals[t.skill].turns  += t.turns;
     }
   }
-  // Convert tool_totals dict to top-3 sorted list per project
+  // Convert skill_totals dict to top-3 sorted list per project
   for (const p of Object.values(projMap)) {
-    p.top_tools = Object.values(p.tool_totals).sort((a, b) => b.tokens - a.tokens).slice(0, 3);
-    delete p.tool_totals;
+    p.top_skills = Object.values(p.skill_totals).sort((a, b) => b.tokens - a.tokens).slice(0, 3);
+    delete p.skill_totals;
   }
   const byProject = Object.values(projMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
@@ -1121,31 +1130,31 @@ function applyFilter() {
   );
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
-  // Tool-call aggregation (filtered by model + range, summed across days)
-  const filteredToolDays = (rawData.tool_calls_by_day || []).filter(r =>
+  // Skill-call aggregation (filtered by model + range, summed across days)
+  const filteredSkillDays = (rawData.skill_calls_by_day || []).filter(r =>
     selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
   );
-  const toolMap = {};
-  for (const r of filteredToolDays) {
-    const key = r.tool + '|' + r.model;
-    if (!toolMap[key]) toolMap[key] = { tool: r.tool, model: r.model, turns: 0, input: 0, output: 0 };
-    toolMap[key].turns  += r.turns;
-    toolMap[key].input  += r.input;
-    toolMap[key].output += r.output;
+  const skillMap = {};
+  for (const r of filteredSkillDays) {
+    const key = r.skill + '|' + r.model;
+    if (!skillMap[key]) skillMap[key] = { skill: r.skill, model: r.model, turns: 0, input: 0, output: 0 };
+    skillMap[key].turns  += r.turns;
+    skillMap[key].input  += r.input;
+    skillMap[key].output += r.output;
   }
-  const toolCalls = Object.values(toolMap);
+  const skillCalls = Object.values(skillMap);
 
   // Update daily chart title
   document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
-  document.getElementById('tool-trend-title').textContent = 'Tool Usage Over Time \u2014 ' + RANGE_LABELS[selectedRange];
+  document.getElementById('tool-trend-title').textContent = 'Skill Usage Over Time \u2014 ' + RANGE_LABELS[selectedRange];
 
   renderStats(totals);
   renderDailyChart(daily);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
-  renderToolTrendChart(filteredToolDays);
+  renderSkillTrendChart(filteredSkillDays);
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1153,8 +1162,8 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
-  lastToolCalls = sortToolCalls(toolCalls);
-  renderToolCallsTable(lastToolCalls);
+  lastSkillCalls = sortSkillCalls(skillCalls);
+  renderSkillCallsTable(lastSkillCalls);
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -1313,48 +1322,48 @@ function renderDailyChart(daily) {
   });
 }
 
-function renderToolTrendChart(toolsByDay) {
-  // Stacked-bar of turns per tool per day. Top 8 tools by total turns get
+function renderSkillTrendChart(skillsByDay) {
+  // Stacked-bar of turns per skill per day. Top 8 skills by total turns get
   // their own color; everything else folded into "other".
   const ctx = document.getElementById('chart-tool-trend').getContext('2d');
-  if (charts.toolTrend) charts.toolTrend.destroy();
-  if (!toolsByDay.length) { charts.toolTrend = null; return; }
+  if (charts.skillTrend) charts.skillTrend.destroy();
+  if (!skillsByDay.length) { charts.skillTrend = null; return; }
 
-  // Aggregate per (day, tool)
-  const dayToolMap = {};
-  const toolTotals = {};
-  for (const r of toolsByDay) {
-    const key = r.day + '\x00' + r.tool;
-    if (!dayToolMap[key]) dayToolMap[key] = { day: r.day, tool: r.tool, turns: 0 };
-    dayToolMap[key].turns += r.turns;
-    toolTotals[r.tool] = (toolTotals[r.tool] || 0) + r.turns;
+  // Aggregate per (day, skill)
+  const daySkillMap = {};
+  const skillTotals = {};
+  for (const r of skillsByDay) {
+    const key = r.day + '\x00' + r.skill;
+    if (!daySkillMap[key]) daySkillMap[key] = { day: r.day, skill: r.skill, turns: 0 };
+    daySkillMap[key].turns += r.turns;
+    skillTotals[r.skill] = (skillTotals[r.skill] || 0) + r.turns;
   }
-  const days = [...new Set(Object.values(dayToolMap).map(r => r.day))].sort();
-  const topTools = Object.entries(toolTotals).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t);
-  const otherTools = new Set(Object.keys(toolTotals).filter(t => !topTools.includes(t)));
+  const days = [...new Set(Object.values(daySkillMap).map(r => r.day))].sort();
+  const topSkills = Object.entries(skillTotals).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t);
+  const otherSkills = new Set(Object.keys(skillTotals).filter(t => !topSkills.includes(t)));
 
   // Chart-friendly palette: distinct hues, theme-agnostic.
   const palette = ['#4f8ef7', '#d97757', '#4ade80', '#facc15', '#a78bfa', '#fb7185', '#22d3ee', '#fb923c', '#94a3b8'];
-  const datasets = topTools.map((tool, i) => ({
-    label: tool,
-    data: days.map(day => (dayToolMap[day + '\x00' + tool] || { turns: 0 }).turns),
+  const datasets = topSkills.map((skill, i) => ({
+    label: skill,
+    data: days.map(day => (daySkillMap[day + '\x00' + skill] || { turns: 0 }).turns),
     backgroundColor: palette[i],
-    stack: 'tools',
+    stack: 'skills',
   }));
-  if (otherTools.size) {
+  if (otherSkills.size) {
     datasets.push({
-      label: `other (${otherTools.size})`,
+      label: `other (${otherSkills.size})`,
       data: days.map(day =>
-        Object.values(dayToolMap)
-          .filter(r => r.day === day && otherTools.has(r.tool))
+        Object.values(daySkillMap)
+          .filter(r => r.day === day && otherSkills.has(r.skill))
           .reduce((sum, r) => sum + r.turns, 0)
       ),
       backgroundColor: palette[8],
-      stack: 'tools',
+      stack: 'skills',
     });
   }
 
-  charts.toolTrend = new Chart(ctx, {
+  charts.skillTrend = new Chart(ctx, {
     type: 'bar',
     data: { labels: days, datasets },
     options: {
@@ -1425,8 +1434,8 @@ function renderSessionsTable(sessions) {
     const sessionCell = s.session_name
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
-    const topTools = (s.tool_breakdown || []).slice(0, 3)
-      .map(t => `<span class="tool-mini" title="${esc(t.tool)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.tool)}</span>`)
+    const topSkills = (s.skill_breakdown || []).slice(0, 3)
+      .map(t => `<span class="tool-mini" title="${esc(t.skill)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.skill)}</span>`)
       .join('') || '<span class="muted" style="font-size:11px">—</span>';
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
@@ -1434,7 +1443,7 @@ function renderSessionsTable(sessions) {
       <td class="muted">${esc(s.last)}</td>
       <td class="muted">${esc(s.duration_min)}m</td>
       <td><span class="model-tag">${esc(s.model)}</span></td>
-      <td class="top-tools-cell">${topTools}</td>
+      <td class="top-tools-cell">${topSkills}</td>
       <td class="num">${s.turns}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
@@ -1614,12 +1623,12 @@ function sortProjects(byProject) {
 
 function renderProjectCostTable(byProject) {
   document.getElementById('project-cost-body').innerHTML = sortProjects(byProject).map(p => {
-    const topTools = (p.top_tools || [])
-      .map(t => `<span class="tool-mini" title="${esc(t.tool)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.tool)}</span>`)
+    const topSkills = (p.top_skills || [])
+      .map(t => `<span class="tool-mini" title="${esc(t.skill)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.skill)}</span>`)
       .join('') || '<span class="muted" style="font-size:11px">—</span>';
     return `<tr>
       <td>${esc(p.project)}</td>
-      <td class="top-tools-cell">${topTools}</td>
+      <td class="top-tools-cell">${topSkills}</td>
       <td class="num">${p.sessions}</td>
       <td class="num">${fmt(p.turns)}</td>
       <td class="num">${fmt(p.input)}</td>
@@ -1678,37 +1687,37 @@ function renderProjectBranchCostTable(rows) {
   }).join('');
 }
 
-function sortToolCalls(rows) {
+function sortSkillCalls(rows) {
   return [...rows].sort((a, b) => {
-    const av = a[toolCallSortCol] ?? 0;
-    const bv = b[toolCallSortCol] ?? 0;
-    if (av < bv) return toolCallSortDir === 'desc' ? 1 : -1;
-    if (av > bv) return toolCallSortDir === 'desc' ? -1 : 1;
+    const av = a[skillCallSortCol] ?? 0;
+    const bv = b[skillCallSortCol] ?? 0;
+    if (av < bv) return skillCallSortDir === 'desc' ? 1 : -1;
+    if (av > bv) return skillCallSortDir === 'desc' ? -1 : 1;
     return 0;
   });
 }
 
-function setToolCallSort(col) {
-  if (toolCallSortCol === col) {
-    toolCallSortDir = toolCallSortDir === 'desc' ? 'asc' : 'desc';
+function setSkillCallSort(col) {
+  if (skillCallSortCol === col) {
+    skillCallSortDir = skillCallSortDir === 'desc' ? 'asc' : 'desc';
   } else {
-    toolCallSortCol = col;
-    toolCallSortDir = 'desc';
+    skillCallSortCol = col;
+    skillCallSortDir = 'desc';
   }
   document.querySelectorAll('[id^="tcsort-"]').forEach(el => el.textContent = '');
-  const icon = document.getElementById('tcsort-' + toolCallSortCol);
-  if (icon) icon.textContent = toolCallSortDir === 'desc' ? ' \u25bc' : ' \u25b2';
-  renderToolCallsTable(sortToolCalls(lastToolCalls));
+  const icon = document.getElementById('tcsort-' + skillCallSortCol);
+  if (icon) icon.textContent = skillCallSortDir === 'desc' ? ' \u25bc' : ' \u25b2';
+  renderSkillCallsTable(sortSkillCalls(lastSkillCalls));
 }
 
-function renderToolCallsTable(rows) {
+function renderSkillCallsTable(rows) {
   const body = document.getElementById('tool-calls-body');
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No tool calls in selected range.</td></tr>';
+    body.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No skill calls in selected range.</td></tr>';
     return;
   }
   body.innerHTML = rows.map(r => `<tr>
-    <td><span class="tool-tag" style="font-family:monospace">${esc(r.tool)}</span></td>
+    <td><span class="tool-tag" style="font-family:monospace">${esc(r.skill)}</span></td>
     <td><span class="model-tag">${esc(r.model)}</span></td>
     <td class="num">${fmt(r.turns)}</td>
     <td class="num">${fmt(r.input)}</td>
@@ -1716,14 +1725,14 @@ function renderToolCallsTable(rows) {
   </tr>`).join('');
 }
 
-function exportToolCallsCSV() {
-  const headers = ['tool','model','turns','input_tokens','output_tokens'];
-  const rows = lastToolCalls.map(r => [r.tool, r.model, r.turns, r.input, r.output]);
+function exportSkillCallsCSV() {
+  const headers = ['skill','model','turns','input_tokens','output_tokens'];
+  const rows = lastSkillCalls.map(r => [r.skill, r.model, r.turns, r.input, r.output]);
   const csv = [headers, ...rows].map(row => row.map(csvField).join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'tool-calls-' + csvTimestamp() + '.csv';
+  a.href = url; a.download = 'skill-calls-' + csvTimestamp() + '.csv';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
