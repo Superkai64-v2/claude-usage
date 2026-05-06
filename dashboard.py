@@ -347,6 +347,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style id="theme-override"></style>
 <style>
   :root {
     --bg: #0f1117;
@@ -480,6 +481,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h1>Claude Code Usage Dashboard</h1>
   <div class="meta" id="meta">Loading...</div>
   <div class="header-controls">
+    <select id="theme-select" class="plan-select" onchange="onThemeChange()" title="UI theme — persists in localStorage"></select>
     <select id="plan-select" class="plan-select" onchange="onPlanChange()" title="Subscription plan — sets the weekly budget for the gauge below"></select>
     <input id="plan-custom-input" class="plan-custom-input" type="number" min="0" step="1" placeholder="$/wk" onchange="onCustomBudgetChange()" style="display:none">
     <button id="rescan-btn" onclick="triggerRescan()" title="Rebuild the database from scratch by re-scanning all JSONL files. Use if data looks stale or costs seem wrong.">&#x21bb; Rescan</button>
@@ -1710,6 +1712,31 @@ function scheduleAutoRefresh() {
   }
 }
 
+// ── Theme switcher ─────────────────────────────────────────────────────────
+// Themes injected from Python BUNDLED_THEMES at render time. Selection
+// persists in localStorage; applied via a <style id="theme-override"> tag
+// that follows the main <style> block so its :root overrides cascade.
+const BUNDLED_THEMES = /*__THEMES_JSON__*/;
+
+function applyTheme(id) {
+  const t = BUNDLED_THEMES.find(x => x.id === id) || BUNDLED_THEMES[0];
+  document.getElementById('theme-override').textContent = t.css;
+  localStorage.setItem('dashboard-theme-id', t.id);
+  document.getElementById('theme-select').value = t.id;
+}
+
+function initThemeSwitcher() {
+  const sel = document.getElementById('theme-select');
+  sel.innerHTML = BUNDLED_THEMES.map(t =>
+    `<option value="${esc(t.id)}">${esc(t.name)}</option>`
+  ).join('');
+  applyTheme(localStorage.getItem('dashboard-theme-id') || 'default');
+}
+
+function onThemeChange() {
+  applyTheme(document.getElementById('theme-select').value);
+}
+
 // ── Subscription budget gauge + plan-switcher ──────────────────────────────
 let subscriptionPlans = [];
 
@@ -1791,6 +1818,7 @@ async function postPlan(plan, customBudget) {
   } catch (e) { showErrorBanner(e); }
 }
 
+initThemeSwitcher();
 loadData();
 loadSubscriptionConfig().then(loadSubscriptionGauge);
 scheduleAutoRefresh();
@@ -1800,12 +1828,34 @@ scheduleAutoRefresh();
 """
 
 
-# Inject the Python PRICING table into the HTML once at import time so the JS
-# table can never drift from the Python one — and so each / request under the
-# threaded server doesn't re-template a 50KB string.
+# Bundled themes — extracted from josepe98's PR #63 BUNDLED_THEMES data
+# (the data only, not their dashboard-wide refactor). The "default" entry
+# captures the current built-in dark palette so users can revert to it.
+BUNDLED_THEMES = [
+    {"id": "default", "name": "Default Dark", "category": "Built-in",
+     "css": ":root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--muted:#8892a4;--accent:#d97757;--blue:#4f8ef7;--green:#4ade80;}"},
+    {"id": "apple", "name": "Apple", "category": "Enterprise & Consumer",
+     "css": ":root{--bg:#f5f5f7;--card:#ffffff;--border:rgba(0,0,0,0.08);--text:#1d1d1f;--muted:rgba(0,0,0,0.48);--accent:#0071e3;--green:#1c7a3a;--blue:#0071e3;}"},
+    {"id": "linear", "name": "Linear", "category": "Developer Tools",
+     "css": ":root{--bg:#0f0f10;--card:#1a1a1b;--border:rgba(255,255,255,0.08);--text:#e8e8e8;--muted:rgba(255,255,255,0.4);--accent:#5e6ad2;--green:#4ade80;--blue:#5e6ad2;}"},
+    {"id": "vercel", "name": "Vercel", "category": "Developer Tools",
+     "css": ":root{--bg:#000000;--card:#111111;--border:rgba(255,255,255,0.1);--text:#ffffff;--muted:rgba(255,255,255,0.4);--accent:#50e3c2;--green:#50e3c2;--blue:#aaaaaa;}"},
+    {"id": "notion", "name": "Notion", "category": "Design & Productivity",
+     "css": ":root{--bg:#ffffff;--card:#f7f7f5;--border:rgba(55,53,47,0.09);--text:#37352f;--muted:rgba(55,53,47,0.5);--accent:#2eaadc;--green:#0f7b6c;--blue:#2eaadc;}"},
+    {"id": "stripe", "name": "Stripe", "category": "Infrastructure & Cloud",
+     "css": ":root{--bg:#f6f9fc;--card:#ffffff;--border:rgba(0,0,0,0.1);--text:#0a2540;--muted:rgba(10,37,64,0.5);--accent:#635bff;--green:#09825d;--blue:#0070f3;}"},
+]
+
+
+# Inject the Python PRICING + THEMES tables into the HTML once at import time
+# so the JS copies can never drift from the Python ones — and so each / request
+# under the threaded server doesn't re-template a 50KB string.
 _RENDERED_HTML = HTML_TEMPLATE.replace(
     "/*__PRICING_JSON__*/",
     json.dumps(PRICING),
+).replace(
+    "/*__THEMES_JSON__*/",
+    json.dumps(BUNDLED_THEMES),
 ).encode("utf-8")
 
 

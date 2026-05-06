@@ -139,6 +139,17 @@ class TestGetDashboardData(unittest.TestCase):
         # Both fixture turns have tool_name=None → no rows expected.
         self.assertEqual(data["tool_calls_by_day"], [])
 
+    def test_themes_injected_into_html(self):
+        """render_html() must inject all BUNDLED_THEMES so the JS dropdown
+        gets populated. Asserting on count + a known theme id covers both
+        the data shape and the placeholder substitution."""
+        from dashboard import render_html, BUNDLED_THEMES
+        html = render_html().decode("utf-8")
+        self.assertNotIn("/*__THEMES_JSON__*/", html)  # placeholder substituted
+        self.assertEqual(len(BUNDLED_THEMES), 6)
+        for theme_id in ("default", "apple", "linear", "vercel", "notion", "stripe"):
+            self.assertIn(f'"id": "{theme_id}"', html)
+
 
 class TestSessionNameInDashboard(unittest.TestCase):
     """Verify session_name from the sessions table surfaces in dashboard output."""
