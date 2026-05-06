@@ -2214,9 +2214,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+def _periodic_rescan_loop(interval_seconds):
+    """Daemon thread that runs an incremental scan every N seconds so the
+    dashboard picks up new JSONL data without the user clicking Rescan.
+    Silent: errors are swallowed (printed once) so a transient FS issue
+    doesn't kill the loop."""
+    import time
+    import scanner
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            scanner.scan(verbose=False)
+        except Exception as e:
+            print(f"[periodic-rescan] error: {e}")
+
+
 def serve(host=None, port=None):
     host = host or os.environ.get("HOST", "localhost")
     port = port or int(os.environ.get("PORT", "8080"))
+
+    # Background incremental scan — picks up new JSONL data while the user
+    # is actively using Claude Code. Default 5 min; CLAUDE_USAGE_RESCAN_SECS=0
+    # disables (e.g. for tests). 1356 unchanged files skip in <2s on this
+    # machine, so the load is negligible.
+    rescan_secs = int(os.environ.get("CLAUDE_USAGE_RESCAN_SECS", "300"))
+    if rescan_secs > 0:
+        import threading
+        t = threading.Thread(target=_periodic_rescan_loop, args=(rescan_secs,), daemon=True)
+        t.start()
+        print(f"Periodic rescan: every {rescan_secs}s")
+
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     print(f"Dashboard running at http://{host}:{port}")
     print("Press Ctrl+C to stop.")
