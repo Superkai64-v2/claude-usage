@@ -150,6 +150,25 @@ class TestGetDashboardData(unittest.TestCase):
         for theme_id in ("default", "apple", "linear", "vercel", "notion", "stripe"):
             self.assertIn(f'"id": "{theme_id}"', html)
 
+    def test_theme_override_style_comes_AFTER_main_style(self):
+        """Regression: <style id='theme-override'> MUST come after the main
+        <style> block. Otherwise the default :root in the main style wins
+        the cascade and theme switches do nothing — exactly the bug the
+        user hit on 2026-05-06."""
+        # Use the rendered HTML (post-injection) so we test what the browser sees.
+        from dashboard import render_html
+        html = render_html().decode("utf-8")
+        # Find positions of: opening of main <style>, its closing </style>,
+        # and the <style id="theme-override">.
+        main_open = html.index("<style>\n")
+        main_close = html.index("</style>", main_open)
+        override_pos = html.index('<style id="theme-override">')
+        self.assertGreater(
+            override_pos, main_close,
+            "theme-override must appear after the main </style>; otherwise "
+            ":root overrides cascade WRONG and themes don't apply."
+        )
+
 
 class TestSessionNameInDashboard(unittest.TestCase):
     """Verify session_name from the sessions table surfaces in dashboard output."""

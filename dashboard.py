@@ -347,7 +347,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style id="theme-override"></style>
 <style>
   :root {
     --bg: #0f1117;
@@ -475,6 +474,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     .detail-grid { grid-template-columns: 1fr; }
   }
 </style>
+<style id="theme-override"></style>
 </head>
 <body>
 <header>
