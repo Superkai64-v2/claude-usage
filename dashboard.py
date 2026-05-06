@@ -1156,6 +1156,7 @@ function applyFilter() {
   document.getElementById('tool-trend-title').textContent = 'Skill Usage Over Time \u2014 ' + RANGE_LABELS[selectedRange];
 
   renderStats(totals);
+  updateGaugeForRange(totals.cost, start, end);
   renderDailyChart(daily);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
@@ -1901,10 +1902,12 @@ function onThemeChange() {
 }
 
 // ── Subscription value gauge + plan-switcher ──────────────────────────────
-// "Has my API-equivalent usage this calendar month exceeded what I pay
-// for the subscription?" If yes → green (subscription is paying for
-// itself). If no and the month is mostly over → red. Mid-month → gray.
+// "Did the API-equivalent cost this period exceed what the subscription
+// would cost (pro-rated for that period)?" Earning out → green; under
+// pace → yellow/red. For plan='none' the gauge just shows the cost
+// without comparison.
 let subscriptionPlans = [];
+let currentPlan = { plan: 'max-20x', monthly_price: 200, plan_label: 'Max 20×' };
 
 async function loadSubscriptionConfig() {
   try {
@@ -1912,55 +1915,114 @@ async function loadSubscriptionConfig() {
     const cfg = await resp.json();
     subscriptionPlans = cfg.available;
     const sel = document.getElementById('plan-select');
-    sel.innerHTML = subscriptionPlans.map(p =>
-      `<option value="${esc(p.value)}">${esc(p.label)}${p.price !== null ? ' ($' + p.price + '/mo)' : ''}</option>`
-    ).join('');
+    sel.innerHTML = subscriptionPlans.map(p => {
+      const priceLabel = p.value === 'none'        ? ''
+                       : p.price === null          ? ''   // custom — input below
+                       : ' ($' + p.price + '/mo)';
+      return `<option value="${esc(p.value)}">${esc(p.label)}${priceLabel}</option>`;
+    }).join('');
     sel.value = cfg.current.plan;
+    currentPlan = {
+      plan: cfg.current.plan,
+      monthly_price: Number(cfg.current.monthly_price) || 0,
+      plan_label: (subscriptionPlans.find(p => p.value === cfg.current.plan) || {}).label || cfg.current.plan,
+    };
     const ci = document.getElementById('plan-custom-input');
     ci.style.display = cfg.current.plan === 'custom' ? 'inline-block' : 'none';
     ci.placeholder = '$/mo';
     if (cfg.current.plan === 'custom') {
       ci.value = cfg.current.monthly_price || '';
     }
+    // If data is already loaded, re-render the gauge with the (possibly
+    // updated) plan baseline. Otherwise the next loadData → applyFilter will.
+    if (rawData) applyFilter();
   } catch (e) { console.error('subscription/config failed', e); }
 }
 
-async function loadSubscriptionGauge() {
-  try {
-    const resp = await fetch('/api/subscription');
-    const d = await resp.json();
-    if (!d.monthly_price) {
-      document.getElementById('gauge-card').style.display = 'none';
-      return;
-    }
-    document.getElementById('gauge-card').style.display = 'flex';
-    document.getElementById('gauge-cost').textContent = '$' + Number(d.cost_used).toLocaleString(undefined, {maximumFractionDigits:2});
-    document.getElementById('gauge-price').textContent = '$' + Number(d.monthly_price).toLocaleString();
-    document.getElementById('gauge-plan').textContent = d.plan_label;
-    document.getElementById('gauge-elapsed').textContent = Math.round(d.elapsed_fraction * 100) + '%';
+// Compute days in the selected range. start/end are 'YYYY-MM-DD' strings or null.
+// For 'all' (both null), use the earliest data day in rawData.
+function getRangeDays(start, end) {
+  const dayMs = 86400000;
+  const today = new Date();
+  const todayUTC = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  let s, e;
+  e = end ? new Date(end + 'T00:00:00Z') : todayUTC;
+  if (start) {
+    s = new Date(start + 'T00:00:00Z');
+  } else if (rawData?.daily_by_model?.length) {
+    // 'all' time: use earliest day in data
+    const earliest = rawData.daily_by_model
+      .map(r => r.day)
+      .reduce((a, b) => (a < b ? a : b));
+    s = new Date(earliest + 'T00:00:00Z');
+  } else {
+    return 30;  // safe default
+  }
+  return Math.max(1, Math.round((e - s) / dayMs) + 1);
+}
 
-    // Arc fills toward 100% of subscription price, then stays full at 100%
-    // (we don't keep growing the arc past full — instead the badge changes).
-    const fillFraction = Math.min(1, d.value_ratio);
-    const arc = document.getElementById('gauge-arc');
-    arc.setAttribute('stroke-dasharray', (fillFraction * 158) + ' 200');
-    const colorMap = { green: '#4ade80', yellow: '#facc15', red: '#f87171', gray: '#8892a4' };
-    arc.setAttribute('stroke', colorMap[d.color] || '#8892a4');
+function updateGaugeForRange(costInRange, start, end) {
+  const card = document.getElementById('gauge-card');
+  card.style.display = 'flex';
 
-    const paceEl = document.getElementById('gauge-pace');
-    paceEl.className = 'gauge-pace ' + d.color;
-    if (d.cost_used < 0.01) {
-      paceEl.textContent = 'no spend yet';
-    } else if (d.value_ratio >= 1.0) {
-      paceEl.textContent = `earning out (${d.value_ratio.toFixed(2)}× value, +$${d.savings.toFixed(0)} saved)`;
-    } else if (d.color === 'gray') {
-      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — too early to call (need $${d.deficit.toFixed(0)} more)`;
-    } else if (d.color === 'yellow') {
-      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — needs $${d.deficit.toFixed(0)} more by month-end`;
-    } else {
-      paceEl.textContent = `${d.value_ratio.toFixed(2)}× — won't earn out at this rate ($${d.deficit.toFixed(0)} short)`;
-    }
-  } catch (e) { console.error('subscription gauge failed', e); }
+  const cost = Number(costInRange) || 0;
+  const days = getRangeDays(start, end);
+  const rangeLabel = RANGE_LABELS[selectedRange] || selectedRange;
+
+  document.getElementById('gauge-cost').textContent = '$' + cost.toLocaleString(undefined, {maximumFractionDigits:2});
+  document.getElementById('gauge-plan').textContent = currentPlan.plan_label;
+  document.getElementById('gauge-elapsed').textContent = days + ' day' + (days === 1 ? '' : 's');
+
+  const arc = document.getElementById('gauge-arc');
+  const paceEl = document.getElementById('gauge-pace');
+  const priceEl = document.getElementById('gauge-price');
+  const colorMap = { green: '#4ade80', yellow: '#facc15', red: '#f87171', gray: '#8892a4' };
+
+  if (currentPlan.plan === 'none' || !currentPlan.monthly_price) {
+    // No plan: show cost only, no comparison. Hide the "/$price" part.
+    document.querySelector('.gauge-label').textContent = 'API spend · ' + rangeLabel;
+    document.querySelector('.gauge-value').innerHTML = '<span id="gauge-cost">$' + cost.toLocaleString(undefined, {maximumFractionDigits:2}) + '</span>';
+    document.querySelector('.gauge-sub').innerHTML = '<span id="gauge-plan">' + esc(currentPlan.plan_label) + '</span> · <span id="gauge-elapsed">' + days + ' day' + (days === 1 ? '' : 's') + '</span>';
+    paceEl.style.display = 'none';
+    arc.setAttribute('stroke-dasharray', '0 200');
+    arc.setAttribute('stroke', colorMap.gray);
+    return;
+  }
+
+  paceEl.style.display = 'inline-block';
+
+  // Pro-rate the monthly price to the selected range.
+  const proratedPrice = currentPlan.monthly_price * (days / 30);
+  const valueRatio = proratedPrice > 0 ? cost / proratedPrice : 0;
+  const color = valueRatio >= 1.0 ? 'green'
+              : days <= 3        ? 'gray'   // too early to judge on a few days
+              : valueRatio < 0.5 ? 'red'
+                                 : 'yellow';
+
+  // Restore label / value markup in case it was overwritten by the no-plan branch.
+  document.querySelector('.gauge-label').textContent = 'API value · ' + rangeLabel;
+  document.querySelector('.gauge-value').innerHTML =
+    '<span id="gauge-cost">$' + cost.toLocaleString(undefined, {maximumFractionDigits:2}) + '</span> / <span id="gauge-price">$' + proratedPrice.toLocaleString(undefined, {maximumFractionDigits:0}) + '</span>';
+  document.querySelector('.gauge-sub').innerHTML =
+    '<span id="gauge-plan">' + esc(currentPlan.plan_label) + ' ($' + currentPlan.monthly_price + '/mo)</span> · pro-rated for <span id="gauge-elapsed">' + days + ' day' + (days === 1 ? '' : 's') + '</span>';
+
+  arc.setAttribute('stroke-dasharray', (Math.min(1, valueRatio) * 158) + ' 200');
+  arc.setAttribute('stroke', colorMap[color] || colorMap.gray);
+
+  paceEl.className = 'gauge-pace ' + color;
+  const savings = Math.max(0, cost - proratedPrice);
+  const deficit = Math.max(0, proratedPrice - cost);
+  if (cost < 0.01) {
+    paceEl.textContent = 'no spend yet';
+  } else if (valueRatio >= 1.0) {
+    paceEl.textContent = `earning out (${valueRatio.toFixed(2)}× value, +$${savings.toFixed(0)} saved)`;
+  } else if (color === 'gray') {
+    paceEl.textContent = `${valueRatio.toFixed(2)}× — too short a range to judge`;
+  } else if (color === 'yellow') {
+    paceEl.textContent = `${valueRatio.toFixed(2)}× — $${deficit.toFixed(0)} short of break-even`;
+  } else {
+    paceEl.textContent = `${valueRatio.toFixed(2)}× — sub not earning back ($${deficit.toFixed(0)} short)`;
+  }
 }
 
 async function onPlanChange() {
@@ -1989,13 +2051,16 @@ async function postPlan(plan, customPrice) {
       showErrorBanner(new Error('Plan update failed: ' + (d.error || 'unknown')));
       return;
     }
-    await loadSubscriptionGauge();
+    // Re-pull config to refresh currentPlan, then re-apply filter so the
+    // gauge re-renders with the new price baseline.
+    await loadSubscriptionConfig();
+    applyFilter();
   } catch (e) { showErrorBanner(e); }
 }
 
 initThemeSwitcher();
+loadSubscriptionConfig();   // populates currentPlan + dropdown; gauge updates from applyFilter
 loadData();
-loadSubscriptionConfig().then(loadSubscriptionGauge);
 scheduleAutoRefresh();
 </script>
 </body>

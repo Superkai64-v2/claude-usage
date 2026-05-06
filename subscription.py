@@ -20,6 +20,7 @@ SUBSCRIPTION_PATH = Path.home() / ".claude" / "usage-subscription.json"
 # Anthropic plan → published USD/month subscription price. Rates as of
 # 2026-05-06. If Anthropic changes plan pricing, update these.
 PLAN_PRICES = {
+    "none":     0,     # No subscription — gauge shows API cost only, no comparison
     "pro":      20,    # Claude Pro
     "pro-5x":   100,   # Claude Pro 5x (legacy / promo tier)
     "max-5x":   100,   # Claude Max 5x
@@ -28,6 +29,7 @@ PLAN_PRICES = {
 }
 
 PLAN_LABELS = {
+    "none":     "No plan",
     "pro":      "Pro",
     "pro-5x":   "Pro 5×",
     "max-5x":   "Max 5×",
