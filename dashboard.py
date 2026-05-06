@@ -1238,8 +1238,24 @@ async function loadData() {
 
     applyFilter();
   } catch(e) {
+    // Surface the error in the DOM instead of console-only — every
+    // "blank dashboard" report on the upstream issue tracker (#74/76/88
+    // /90/92/93/99/106) was harder to diagnose because exceptions thrown
+    // in applyFilter() got silently swallowed here.
     console.error(e);
+    showErrorBanner(e);
   }
+}
+
+function showErrorBanner(e) {
+  let banner = document.getElementById('error-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'error-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:12px 24px;background:#7f1d1d;color:#fee2e2;font-family:-apple-system,sans-serif;font-size:13px;z-index:9999;border-bottom:1px solid #f87171;';
+    document.body.prepend(banner);
+  }
+  banner.textContent = 'Dashboard error: ' + (e?.message || String(e)) + ' (see browser console for stack trace)';
 }
 
 let autoRefreshTimer = null;
