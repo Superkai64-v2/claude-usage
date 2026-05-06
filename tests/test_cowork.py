@@ -48,14 +48,16 @@ class TestCoworkSessionsDir(unittest.TestCase):
         with mock.patch("cowork.sys.platform", "linux"), \
              mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": "/tmp/xdg"}, clear=False):
             p = cowork.cowork_sessions_dir()
-        self.assertEqual(str(p), "/tmp/xdg/Claude/local-agent-mode-sessions")
+        # Use as_posix() so the assertion is path-separator agnostic — pathlib
+        # on Windows returns backslashes via str() even when the input was POSIX.
+        self.assertEqual(p.as_posix(), "/tmp/xdg/Claude/local-agent-mode-sessions")
 
     def test_linux_default(self):
         env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
         with mock.patch("cowork.sys.platform", "linux"), \
              mock.patch.dict(os.environ, env, clear=True):
             p = cowork.cowork_sessions_dir()
-        self.assertTrue(str(p).endswith("/.config/Claude/local-agent-mode-sessions"))
+        self.assertTrue(p.as_posix().endswith("/.config/Claude/local-agent-mode-sessions"))
 
 
 class TestFindAuditFiles(unittest.TestCase):
