@@ -131,6 +131,14 @@ class TestGetDashboardData(unittest.TestCase):
         self.assertIn("session_name", session)
         self.assertEqual(session["session_name"], "")
 
+    def test_tool_calls_by_day_present(self):
+        """tool_calls_by_day must be in the API response, list type."""
+        data = get_dashboard_data(db_path=self.db_path)
+        self.assertIn("tool_calls_by_day", data)
+        self.assertIsInstance(data["tool_calls_by_day"], list)
+        # Both fixture turns have tool_name=None → no rows expected.
+        self.assertEqual(data["tool_calls_by_day"], [])
+
 
 class TestSessionNameInDashboard(unittest.TestCase):
     """Verify session_name from the sessions table surfaces in dashboard output."""
@@ -208,6 +216,16 @@ class TestSessionDetail(unittest.TestCase):
         self.assertEqual(detail["tool_usage"][0]["tool_name"], "reply")
         self.assertEqual(detail["cwd_usage"][0]["cwd"], "/tmp")
         self.assertEqual(len(detail["turn_history"]), 1)
+
+    def test_tool_calls_by_day_aggregates_real_tool_usage(self):
+        data = get_dashboard_data(db_path=self.db_path)
+        rows = data["tool_calls_by_day"]
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["tool"], "reply")
+        self.assertEqual(r["turns"], 1)
+        self.assertEqual(r["input"], 500)
+        self.assertEqual(r["output"], 200)
 
     def test_session_detail_token_values(self):
         detail = get_session_detail("sess-abc123", db_path=self.db_path)

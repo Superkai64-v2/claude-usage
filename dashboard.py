@@ -80,6 +80,32 @@ def get_dashboard_data(db_path=DB_PATH):
         "turns":  r["turns"] or 0,
     } for r in hourly_rows]
 
+    # ── Tool-call usage per day per model (client filters by range + model) ───
+    # Cowork sessions don't carry tool_name (cowork.py stores None) so they're
+    # silently excluded — document this in the table caption.
+    tool_rows = conn.execute("""
+        SELECT
+            substr(timestamp, 1, 10)   as day,
+            COALESCE(model, 'unknown') as model,
+            tool_name                  as tool,
+            COUNT(*)                   as turns,
+            SUM(input_tokens)          as input,
+            SUM(output_tokens)         as output
+        FROM turns
+        WHERE tool_name IS NOT NULL AND tool_name != ''
+        GROUP BY day, model, tool
+        ORDER BY day, model, tool
+    """).fetchall()
+
+    tool_calls_by_day = [{
+        "day":    r["day"],
+        "model":  r["model"],
+        "tool":   r["tool"],
+        "turns":  r["turns"] or 0,
+        "input":  r["input"] or 0,
+        "output": r["output"] or 0,
+    } for r in tool_rows]
+
     # ── All sessions (client filters by range and model) ──────────────────────
     # session_name may be missing on older DB schemas; fall back gracefully.
     try:
@@ -133,11 +159,12 @@ def get_dashboard_data(db_path=DB_PATH):
     conn.close()
 
     return {
-        "all_models":      all_models,
-        "daily_by_model":  daily_by_model,
-        "hourly_by_model": hourly_by_model,
-        "sessions_all":    sessions_all,
-        "generated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "all_models":        all_models,
+        "daily_by_model":    daily_by_model,
+        "hourly_by_model":   hourly_by_model,
+        "tool_calls_by_day": tool_calls_by_day,
+        "sessions_all":      sessions_all,
+        "generated_at":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -472,6 +499,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="project-branch-cost-body"></tbody>
     </table>
   </div>
+  <div class="table-card">
+    <div class="section-header"><div class="section-title">Tool Calls (across selected range)</div><button class="export-btn" onclick="exportToolCallsCSV()" title="Export tool-call breakdown to CSV">&#x2913; CSV</button></div>
+    <p class="muted" style="font-size:11px;margin:0 0 8px 0">Aggregated across all sessions in the selected time window. Cowork sessions are excluded (audit logs don't carry tool data).</p>
+    <table>
+      <thead><tr>
+        <th>Tool</th>
+        <th>Model</th>
+        <th class="sortable" onclick="setToolCallSort('turns')">Turns <span class="sort-icon" id="tcsort-turns"></span></th>
+        <th class="sortable" onclick="setToolCallSort('input')">Input <span class="sort-icon" id="tcsort-input"></span></th>
+        <th class="sortable" onclick="setToolCallSort('output')">Output <span class="sort-icon" id="tcsort-output"></span></th>
+      </tr></thead>
+      <tbody id="tool-calls-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <footer>
@@ -511,6 +552,9 @@ let branchSortDir = 'desc';
 let lastFilteredSessions = [];
 let lastByProject = [];
 let lastByProjectBranch = [];
+let lastToolCalls = [];
+let toolCallSortCol = 'turns';
+let toolCallSortDir = 'desc';
 let sessionSortDir = 'desc';
 let hourlyTZ = 'local';  // 'local' or 'utc'
 
@@ -896,6 +940,20 @@ function applyFilter() {
   );
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
+  // Tool-call aggregation (filtered by model + range, summed across days)
+  const toolMap = {};
+  for (const r of (rawData.tool_calls_by_day || [])) {
+    if (!selectedModels.has(r.model)) continue;
+    if (start && r.day < start) continue;
+    if (end && r.day > end) continue;
+    const key = r.tool + '|' + r.model;
+    if (!toolMap[key]) toolMap[key] = { tool: r.tool, model: r.model, turns: 0, input: 0, output: 0 };
+    toolMap[key].turns  += r.turns;
+    toolMap[key].input  += r.input;
+    toolMap[key].output += r.output;
+  }
+  const toolCalls = Object.values(toolMap);
+
   // Update daily chart title
   document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
@@ -912,6 +970,8 @@ function applyFilter() {
   renderModelCostTable(byModel);
   renderProjectCostTable(lastByProject.slice(0, 20));
   renderProjectBranchCostTable(lastByProjectBranch.slice(0, 20));
+  lastToolCalls = sortToolCalls(toolCalls);
+  renderToolCallsTable(lastToolCalls);
 
   const visibleSessions = lastFilteredSessions.slice(0, 20);
   if (!visibleSessions.length) {
@@ -1353,6 +1413,56 @@ function renderProjectBranchCostTable(rows) {
       <td class="cost">${fmtCost(pb.cost)}</td>
     </tr>`;
   }).join('');
+}
+
+function sortToolCalls(rows) {
+  return [...rows].sort((a, b) => {
+    const av = a[toolCallSortCol] ?? 0;
+    const bv = b[toolCallSortCol] ?? 0;
+    if (av < bv) return toolCallSortDir === 'desc' ? 1 : -1;
+    if (av > bv) return toolCallSortDir === 'desc' ? -1 : 1;
+    return 0;
+  });
+}
+
+function setToolCallSort(col) {
+  if (toolCallSortCol === col) {
+    toolCallSortDir = toolCallSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    toolCallSortCol = col;
+    toolCallSortDir = 'desc';
+  }
+  document.querySelectorAll('[id^="tcsort-"]').forEach(el => el.textContent = '');
+  const icon = document.getElementById('tcsort-' + toolCallSortCol);
+  if (icon) icon.textContent = toolCallSortDir === 'desc' ? ' \u25bc' : ' \u25b2';
+  renderToolCallsTable(sortToolCalls(lastToolCalls));
+}
+
+function renderToolCallsTable(rows) {
+  const body = document.getElementById('tool-calls-body');
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">No tool calls in selected range.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `<tr>
+    <td><span class="tool-tag" style="font-family:monospace">${esc(r.tool)}</span></td>
+    <td><span class="model-tag">${esc(r.model)}</span></td>
+    <td class="num">${fmt(r.turns)}</td>
+    <td class="num">${fmt(r.input)}</td>
+    <td class="num">${fmt(r.output)}</td>
+  </tr>`).join('');
+}
+
+function exportToolCallsCSV() {
+  const headers = ['tool','model','turns','input_tokens','output_tokens'];
+  const rows = lastToolCalls.map(r => [r.tool, r.model, r.turns, r.input, r.output]);
+  const csv = [headers, ...rows].map(row => row.map(csvField).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'tool-calls-' + csvTimestamp() + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ── CSV Export ────────────────────────────────────────────────────────────
