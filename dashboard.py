@@ -1248,13 +1248,17 @@ scheduleAutoRefresh();
 """
 
 
+# Inject the Python PRICING table into the HTML once at import time so the JS
+# table can never drift from the Python one — and so each / request under the
+# threaded server doesn't re-template a 50KB string.
+_RENDERED_HTML = HTML_TEMPLATE.replace(
+    "/*__PRICING_JSON__*/",
+    json.dumps(PRICING),
+).encode("utf-8")
+
+
 def render_html():
-    """Inject the Python PRICING table into the HTML so the JS table
-    can never drift from the Python one."""
-    return HTML_TEMPLATE.replace(
-        "/*__PRICING_JSON__*/",
-        json.dumps(PRICING),
-    ).encode("utf-8")
+    return _RENDERED_HTML
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
