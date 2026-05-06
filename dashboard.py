@@ -112,6 +112,32 @@ def get_dashboard_data(db_path=DB_PATH):
         "output": r["output"] or 0,
     } for r in tool_rows]
 
+    # ── Per-session tool breakdown (top 5 tools per session) ──────────────────
+    # Used for both the Sessions-table "Top Tools" column and the Cost-by-
+    # Project aggregation (JS rolls these up by project in applyFilter).
+    per_session_tool_rows = conn.execute("""
+        SELECT
+            session_id,
+            tool_name as tool,
+            COUNT(*) as turns,
+            SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) as tokens
+        FROM turns
+        WHERE tool_name IS NOT NULL AND tool_name != ''
+        GROUP BY session_id, tool_name
+    """).fetchall()
+    tool_breakdown_by_session = {}
+    for r in per_session_tool_rows:
+        sid = r["session_id"]
+        tool_breakdown_by_session.setdefault(sid, []).append({
+            "tool":   r["tool"],
+            "turns":  r["turns"] or 0,
+            "tokens": r["tokens"] or 0,
+        })
+    # Trim to top 5 per session, sorted by tokens descending
+    for sid, tools in tool_breakdown_by_session.items():
+        tools.sort(key=lambda t: -t["tokens"])
+        tool_breakdown_by_session[sid] = tools[:5]
+
     # ── All sessions (client filters by range and model) ──────────────────────
     # session_name may be missing on older DB schemas; fall back gracefully.
     try:
@@ -148,6 +174,7 @@ def get_dashboard_data(db_path=DB_PATH):
             "session_id":    r["session_id"][:8],
             "session_id_full": r["session_id"],
             "session_name":  r["session_name"] or "",
+            "tool_breakdown": tool_breakdown_by_session.get(r["session_id"], []),
             "project":       r["project_name"] or "unknown",
             "branch":        r["git_branch"] or "",
             "first":         (r["first_timestamp"] or "")[:16].replace("T", " "),
@@ -477,6 +504,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .pill.heavy { font-size: 14px; padding: 8px 14px; font-weight: 600; }
   .pill.medium { font-size: 13px; padding: 6px 12px; }
   .pill.light { font-size: 11px; padding: 4px 9px; opacity: 0.8; }
+  /* Compact tool tags inside table cells (Sessions / Cost-by-Project tables). */
+  .top-tools-cell { white-space: nowrap; }
+  .tool-mini { display: inline-block; font-size: 10px; padding: 1px 6px; margin-right: 3px; border-radius: 4px; background: rgba(255,255,255,0.05); color: var(--muted); border: 1px solid var(--border); font-family: monospace; }
+  .tool-mini:last-child { margin-right: 0; }
   .hint { color: var(--muted); font-size: 12px; }
 
   footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
@@ -565,6 +596,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h2>Top Projects by Tokens</h2>
       <div class="chart-wrap"><canvas id="chart-project"></canvas></div>
     </div>
+    <div class="chart-card wide">
+      <h2 id="tool-trend-title">Tool Usage Over Time</h2>
+      <div class="chart-wrap tall"><canvas id="chart-tool-trend"></canvas></div>
+    </div>
   </div>
   <div class="table-card">
     <div class="section-title">Cost by Model</div>
@@ -591,6 +626,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th class="sortable" onclick="setSessionSort('last')">Last Active <span class="sort-icon" id="sort-icon-last"></span></th>
         <th class="sortable" onclick="setSessionSort('duration_min')">Duration <span class="sort-icon" id="sort-icon-duration_min"></span></th>
         <th>Model</th>
+        <th>Top Tools</th>
         <th class="sortable" onclick="setSessionSort('turns')">Turns <span class="sort-icon" id="sort-icon-turns"></span></th>
         <th class="sortable" onclick="setSessionSort('input')">Input <span class="sort-icon" id="sort-icon-input"></span></th>
         <th class="sortable" onclick="setSessionSort('output')">Output <span class="sort-icon" id="sort-icon-output"></span></th>
@@ -608,6 +644,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <table>
       <thead><tr>
         <th>Project</th>
+        <th>Top Tools</th>
         <th class="sortable" onclick="setProjectSort('sessions')">Sessions <span class="sort-icon" id="psort-sessions"></span></th>
         <th class="sortable" onclick="setProjectSort('turns')">Turns <span class="sort-icon" id="psort-turns"></span></th>
         <th class="sortable" onclick="setProjectSort('input')">Input <span class="sort-icon" id="psort-input"></span></th>
@@ -1025,10 +1062,11 @@ function applyFilter() {
 
   const byModel = Object.values(modelMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
-  // By project: aggregate from filtered sessions
+  // By project: aggregate from filtered sessions, including per-project
+  // tool breakdown rolled up from each session's tool_breakdown.
   const projMap = {};
   for (const s of filteredSessions) {
-    if (!projMap[s.project]) projMap[s.project] = { project: s.project, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0, cost: 0 };
+    if (!projMap[s.project]) projMap[s.project] = { project: s.project, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0, sessions: 0, cost: 0, tool_totals: {} };
     const p = projMap[s.project];
     p.input          += s.input;
     p.output         += s.output;
@@ -1037,6 +1075,16 @@ function applyFilter() {
     p.turns          += s.turns;
     p.sessions++;
     p.cost += calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
+    for (const t of (s.tool_breakdown || [])) {
+      if (!p.tool_totals[t.tool]) p.tool_totals[t.tool] = { tool: t.tool, tokens: 0, turns: 0 };
+      p.tool_totals[t.tool].tokens += t.tokens;
+      p.tool_totals[t.tool].turns  += t.turns;
+    }
+  }
+  // Convert tool_totals dict to top-3 sorted list per project
+  for (const p of Object.values(projMap)) {
+    p.top_tools = Object.values(p.tool_totals).sort((a, b) => b.tokens - a.tokens).slice(0, 3);
+    delete p.tool_totals;
   }
   const byProject = Object.values(projMap).sort((a, b) => (b.input + b.output) - (a.input + a.output));
 
@@ -1074,11 +1122,11 @@ function applyFilter() {
   const hourlyAgg = aggregateHourly(hourlySrc, hourlyTZ);
 
   // Tool-call aggregation (filtered by model + range, summed across days)
+  const filteredToolDays = (rawData.tool_calls_by_day || []).filter(r =>
+    selectedModels.has(r.model) && (!start || r.day >= start) && (!end || r.day <= end)
+  );
   const toolMap = {};
-  for (const r of (rawData.tool_calls_by_day || [])) {
-    if (!selectedModels.has(r.model)) continue;
-    if (start && r.day < start) continue;
-    if (end && r.day > end) continue;
+  for (const r of filteredToolDays) {
     const key = r.tool + '|' + r.model;
     if (!toolMap[key]) toolMap[key] = { tool: r.tool, model: r.model, turns: 0, input: 0, output: 0 };
     toolMap[key].turns  += r.turns;
@@ -1090,12 +1138,14 @@ function applyFilter() {
   // Update daily chart title
   document.getElementById('daily-chart-title').textContent = 'Daily Token Usage \u2014 ' + RANGE_LABELS[selectedRange];
   document.getElementById('hourly-chart-title').textContent = 'Average Hourly Distribution \u2014 ' + RANGE_LABELS[selectedRange];
+  document.getElementById('tool-trend-title').textContent = 'Tool Usage Over Time \u2014 ' + RANGE_LABELS[selectedRange];
 
   renderStats(totals);
   renderDailyChart(daily);
   renderHourlyChart(hourlyAgg);
   renderModelChart(byModel);
   renderProjectChart(byProject);
+  renderToolTrendChart(filteredToolDays);
   lastFilteredSessions = sortSessions(filteredSessions);
   lastByProject = sortProjects(byProject);
   lastByProjectBranch = sortProjectBranch(byProjectBranch);
@@ -1263,6 +1313,64 @@ function renderDailyChart(daily) {
   });
 }
 
+function renderToolTrendChart(toolsByDay) {
+  // Stacked-bar of turns per tool per day. Top 8 tools by total turns get
+  // their own color; everything else folded into "other".
+  const ctx = document.getElementById('chart-tool-trend').getContext('2d');
+  if (charts.toolTrend) charts.toolTrend.destroy();
+  if (!toolsByDay.length) { charts.toolTrend = null; return; }
+
+  // Aggregate per (day, tool)
+  const dayToolMap = {};
+  const toolTotals = {};
+  for (const r of toolsByDay) {
+    const key = r.day + '\x00' + r.tool;
+    if (!dayToolMap[key]) dayToolMap[key] = { day: r.day, tool: r.tool, turns: 0 };
+    dayToolMap[key].turns += r.turns;
+    toolTotals[r.tool] = (toolTotals[r.tool] || 0) + r.turns;
+  }
+  const days = [...new Set(Object.values(dayToolMap).map(r => r.day))].sort();
+  const topTools = Object.entries(toolTotals).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t);
+  const otherTools = new Set(Object.keys(toolTotals).filter(t => !topTools.includes(t)));
+
+  // Chart-friendly palette: distinct hues, theme-agnostic.
+  const palette = ['#4f8ef7', '#d97757', '#4ade80', '#facc15', '#a78bfa', '#fb7185', '#22d3ee', '#fb923c', '#94a3b8'];
+  const datasets = topTools.map((tool, i) => ({
+    label: tool,
+    data: days.map(day => (dayToolMap[day + '\x00' + tool] || { turns: 0 }).turns),
+    backgroundColor: palette[i],
+    stack: 'tools',
+  }));
+  if (otherTools.size) {
+    datasets.push({
+      label: `other (${otherTools.size})`,
+      data: days.map(day =>
+        Object.values(dayToolMap)
+          .filter(r => r.day === day && otherTools.has(r.tool))
+          .reduce((sum, r) => sum + r.turns, 0)
+      ),
+      backgroundColor: palette[8],
+      stack: 'tools',
+    });
+  }
+
+  charts.toolTrend = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: days, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#8892a4', boxWidth: 12, font: { size: 11 } } },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.raw)} turns` } },
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: '#8892a4', maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: '#2a2d3a' } },
+        y: { stacked: true, ticks: { color: '#8892a4', callback: v => fmt(v) }, grid: { color: '#2a2d3a' }, title: { display: true, text: 'Turns', color: '#8892a4' } },
+      }
+    }
+  });
+}
+
 function renderModelChart(byModel) {
   const ctx = document.getElementById('chart-model').getContext('2d');
   if (charts.model) charts.model.destroy();
@@ -1317,12 +1425,16 @@ function renderSessionsTable(sessions) {
     const sessionCell = s.session_name
       ? `<td><span class="session-name">${esc(s.session_name)}</span> <span class="muted" style="font-family:monospace">(${esc(s.session_id)}&hellip;)</span></td>`
       : `<td class="muted" style="font-family:monospace">${esc(s.session_id)}&hellip;</td>`;
+    const topTools = (s.tool_breakdown || []).slice(0, 3)
+      .map(t => `<span class="tool-mini" title="${esc(t.tool)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.tool)}</span>`)
+      .join('') || '<span class="muted" style="font-size:11px">—</span>';
     return `<tr class="session-row ${selectedSessionId === s.session_id_full ? 'selected' : ''}" data-session-id="${esc(s.session_id_full)}">
       ${sessionCell}
       <td>${esc(s.project)}</td>
       <td class="muted">${esc(s.last)}</td>
       <td class="muted">${esc(s.duration_min)}m</td>
       <td><span class="model-tag">${esc(s.model)}</span></td>
+      <td class="top-tools-cell">${topTools}</td>
       <td class="num">${s.turns}</td>
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
@@ -1502,8 +1614,12 @@ function sortProjects(byProject) {
 
 function renderProjectCostTable(byProject) {
   document.getElementById('project-cost-body').innerHTML = sortProjects(byProject).map(p => {
+    const topTools = (p.top_tools || [])
+      .map(t => `<span class="tool-mini" title="${esc(t.tool)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)} turns">${esc(t.tool)}</span>`)
+      .join('') || '<span class="muted" style="font-size:11px">—</span>';
     return `<tr>
       <td>${esc(p.project)}</td>
+      <td class="top-tools-cell">${topTools}</td>
       <td class="num">${p.sessions}</td>
       <td class="num">${fmt(p.turns)}</td>
       <td class="num">${fmt(p.input)}</td>

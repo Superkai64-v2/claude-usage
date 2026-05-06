@@ -279,6 +279,20 @@ class TestSessionDetail(unittest.TestCase):
         self.assertEqual(r["input"], 500)
         self.assertEqual(r["output"], 200)
 
+    def test_session_tool_breakdown_attached_to_sessions_all(self):
+        """Each sessions_all entry should carry a tool_breakdown list of
+        top-5 tools by token count, used by the Sessions-table 'Top Tools'
+        column and the Cost-by-Project aggregation."""
+        data = get_dashboard_data(db_path=self.db_path)
+        s = data["sessions_all"][0]
+        self.assertIn("tool_breakdown", s)
+        self.assertEqual(len(s["tool_breakdown"]), 1)
+        t = s["tool_breakdown"][0]
+        self.assertEqual(t["tool"], "reply")
+        self.assertEqual(t["turns"], 1)
+        # tokens = input + output + cache_read + cache_creation = 500+200+50+20
+        self.assertEqual(t["tokens"], 770)
+
     def test_session_detail_token_values(self):
         detail = get_session_detail("sess-abc123", db_path=self.db_path)
         turn = detail["turn_history"][0]
@@ -330,6 +344,53 @@ class TestSessionDetail(unittest.TestCase):
         self.assertEqual(session["session_id_full"], "sess-abc123")
         self.assertEqual(session["branch"], "main")
         self.assertIn("2026-04-08", session["first"])
+
+
+class TestToolBreakdownTopFive(unittest.TestCase):
+    """tool_breakdown is trimmed to top 5 tools per session by tokens."""
+
+    def setUp(self):
+        self.tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmpfile.close()
+        self.db_path = Path(self.tmpfile.name)
+        conn = get_db(self.db_path)
+        init_db(conn)
+        upsert_sessions(conn, [{
+            "session_id": "sess-multi", "project_name": "p",
+            "first_timestamp": "2026-04-08T09:00:00Z",
+            "last_timestamp": "2026-04-08T10:00:00Z",
+            "git_branch": "main", "model": "claude-sonnet-4-6",
+            "total_input_tokens": 0, "total_output_tokens": 0,
+            "total_cache_read": 0, "total_cache_creation": 0,
+            "turn_count": 7,
+        }])
+        # 7 different tools, each with distinct token counts so ordering is unambiguous
+        turns = []
+        for i, (tool, tokens) in enumerate([
+            ("Bash", 1000), ("Edit", 800), ("Read", 600), ("Grep", 400),
+            ("Write", 200), ("Glob", 50), ("Skill", 25),
+        ]):
+            turns.append({
+                "session_id": "sess-multi",
+                "timestamp": f"2026-04-08T09:{i:02d}:00Z",
+                "model": "claude-sonnet-4-6",
+                "input_tokens": tokens, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_creation_tokens": 0,
+                "tool_name": tool, "cwd": "/tmp",
+            })
+        insert_turns(conn, turns)
+        conn.commit(); conn.close()
+
+    def tearDown(self):
+        os.unlink(self.db_path)
+
+    def test_breakdown_capped_at_5_and_sorted_descending(self):
+        data = get_dashboard_data(db_path=self.db_path)
+        s = data["sessions_all"][0]
+        bd = s["tool_breakdown"]
+        self.assertEqual(len(bd), 5)
+        self.assertEqual([t["tool"] for t in bd], ["Bash", "Edit", "Read", "Grep", "Write"])
+        # Glob (50) and Skill (25) are correctly excluded.
 
 
 class TestDashboardHTTP(unittest.TestCase):
