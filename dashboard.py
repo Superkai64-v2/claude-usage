@@ -449,15 +449,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .export-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 5px; cursor: pointer; font-size: 11px; }
   .export-btn:hover { color: var(--text); border-color: var(--accent); }
   .table-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 24px; overflow-x: auto; }
-  .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 16px; }
-  .detail-card { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  /* grid-template-rows: minmax(0, 70vh) caps the row height (max-height
+     on the grid container alone is ignored — auto rows grow to content). */
+  .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr; grid-template-rows: minmax(0, 70vh); gap: 16px; align-items: stretch; }
+  .detail-card { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; }
   .detail-card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 12px; }
+  .detail-grid > .detail-card { /* turn-history (left) — fill its grid track */ height: 100%; min-height: 0; }
+  /* Right column: stacked tool-usage + cwds. Make it a flex column that
+     fills the grid row, with the tool-usage card allowed to scroll its
+     pill list when the list gets long. */
+  .detail-grid > div { display: flex; flex-direction: column; gap: 16px; min-height: 0; height: 100%; }
+  .detail-grid > div > .detail-card:first-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  .detail-grid > div > .detail-card:last-child { flex: 0 0 auto; }
   .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .detail-meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
   .detail-meta .value { font-size: 13px; }
   .pill-list { display: flex; flex-wrap: wrap; gap: 8px; }
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text); background: rgba(255,255,255,0.02); }
-  .detail-table-wrap { max-height: 360px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; }
+  /* min-height: 0 lets the flex child shrink below its content size so the
+     parent's max-height can clip it and inner scroll kicks in. */
+  .detail-table-wrap { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; }
   .detail-table-wrap table { font-size: 12px; }
   .detail-table-wrap table th, .detail-table-wrap table td { padding: 6px 8px; }
   .detail-table-wrap table th { position: sticky; top: 0; background: var(--card); }
