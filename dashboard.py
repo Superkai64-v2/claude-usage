@@ -457,8 +457,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .detail-meta .value { font-size: 13px; }
   .pill-list { display: flex; flex-wrap: wrap; gap: 8px; }
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; font-size: 12px; color: var(--text); background: rgba(255,255,255,0.02); }
-  .detail-table-wrap { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .detail-table-wrap { max-height: 360px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--border); border-radius: 8px; }
+  .detail-table-wrap table { font-size: 12px; }
+  .detail-table-wrap table th, .detail-table-wrap table td { padding: 6px 8px; }
   .detail-table-wrap table th { position: sticky; top: 0; background: var(--card); }
+  .detail-table-wrap td.cache { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  /* Tool-usage pills scale with usage: the top-used tool is largest, the rest taper. */
+  .pill.heavy { font-size: 14px; padding: 8px 14px; font-weight: 600; }
+  .pill.medium { font-size: 13px; padding: 6px 12px; }
+  .pill.light { font-size: 11px; padding: 4px 9px; opacity: 0.8; }
   .hint { color: var(--muted); font-size: 12px; }
 
   footer { border-top: 1px solid var(--border); padding: 20px 24px; margin-top: 8px; }
@@ -1367,12 +1374,25 @@ function renderSessionDetail(detail) {
   const detailCard = document.getElementById('session-detail-card');
   detailCard.style.display = '';
 
+  // Scale pill weight by usage share. The top tool gets "heavy", the next
+  // ~20% get "medium", the rest are "light" so the eye is drawn to the
+  // dominant tools without losing the long tail.
+  const maxToolTokens = Math.max(1, ...detail.tool_usage.map(t => t.tokens || 0));
   const toolPills = detail.tool_usage.length
-    ? detail.tool_usage.map(t => `<span class="pill">${esc(t.tool_name)} · ${fmt(t.tokens)} tokens · ${fmt(t.turns)} turns</span>`).join('')
+    ? detail.tool_usage.map(t => {
+        const share = (t.tokens || 0) / maxToolTokens;
+        const cls = share >= 0.6 ? 'heavy' : share >= 0.2 ? 'medium' : 'light';
+        return `<span class="pill ${cls}">${esc(t.tool_name)} · ${fmt(t.tokens)} tok · ${fmt(t.turns)}t</span>`;
+      }).join('')
     : '<div class="hint">No tool usage recorded.</div>';
 
+  const maxCwdTurns = Math.max(1, ...detail.cwd_usage.map(c => c.turns || 0));
   const cwdPills = detail.cwd_usage.length
-    ? detail.cwd_usage.map(c => `<span class="pill">${esc(c.cwd)} · ${fmt(c.turns)} turns</span>`).join('')
+    ? detail.cwd_usage.map(c => {
+        const share = (c.turns || 0) / maxCwdTurns;
+        const cls = share >= 0.6 ? 'heavy' : share >= 0.2 ? 'medium' : 'light';
+        return `<span class="pill ${cls}">${esc(c.cwd)} · ${fmt(c.turns)}t</span>`;
+      }).join('')
     : '<div class="hint">No working directory recorded.</div>';
 
   document.getElementById('session-detail').innerHTML = `
@@ -1392,18 +1412,16 @@ function renderSessionDetail(detail) {
         <div class="detail-table-wrap">
           <table>
             <thead><tr>
-              <th>Time</th><th>Tool</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Creation</th><th>Total</th>
+              <th>Time</th><th>Tool</th><th>In</th><th>Out</th><th>Cache (R/W)</th><th>Total</th>
             </tr></thead>
             <tbody>
               ${detail.turn_history.map(turn => `
                 <tr>
-                  <td class="muted">${esc(turn.timestamp_short)}</td>
+                  <td class="muted">${esc((turn.timestamp_short || '').slice(5, 16))}</td>
                   <td>${esc(turn.tool_name)}</td>
-                  <td><span class="model-tag">${esc(turn.model)}</span></td>
                   <td class="num">${fmt(turn.input)}</td>
                   <td class="num">${fmt(turn.output)}</td>
-                  <td class="num">${fmt(turn.cache_read)}</td>
-                  <td class="num">${fmt(turn.cache_creation)}</td>
+                  <td class="num cache">${fmt(turn.cache_read)} / ${fmt(turn.cache_creation)}</td>
                   <td class="num">${fmt(turn.total)}</td>
                 </tr>
               `).join('')}
