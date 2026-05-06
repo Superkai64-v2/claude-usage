@@ -1942,6 +1942,13 @@ async function loadSubscriptionConfig() {
 // Compute days in the selected range. start/end are 'YYYY-MM-DD' strings or null.
 // For 'all' (both null), use the earliest data day in rawData.
 function getRangeDays(start, end) {
+  // Nd ranges: trust the label. getRangeBounds sets start=today-N which
+  // inclusively gives N+1 calendar days, but the user-facing semantics
+  // (and the pro-rated price math) want exactly N days for "Last N Days".
+  if (selectedRange === '7d')  return 7;
+  if (selectedRange === '30d') return 30;
+  if (selectedRange === '90d') return 90;
+
   const dayMs = 86400000;
   const today = new Date();
   const todayUTC = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
