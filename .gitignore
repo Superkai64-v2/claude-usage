@@ -1,2 +1,7 @@
 __pycache__/
 server.log
+screenshots/
+
+# Claude Code local config (skills, plans, settings) — per-developer, never committed
+.claude/
+.playwright-mcp/
