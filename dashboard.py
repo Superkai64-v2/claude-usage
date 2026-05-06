@@ -231,7 +231,7 @@ def get_session_detail(session_id, db_path=None):
     turn_rows = conn.execute("""
         SELECT
             timestamp, model, input_tokens, output_tokens,
-            cache_read_tokens, cache_creation_tokens, tool_name, cwd
+            cache_read_tokens, cache_creation_tokens, tool_name, skill_name, cwd
         FROM turns
         WHERE session_id = ?
         ORDER BY timestamp ASC, id ASC
@@ -239,10 +239,12 @@ def get_session_detail(session_id, db_path=None):
 
     turns = []
     tool_usage = {}
+    skill_usage = {}
     cwd_counts = {}
 
     for r in turn_rows:
         tool_name = r["tool_name"] or "reply"
+        skill_name = r["skill_name"]
         cwd = r["cwd"] or "unknown"
         total_tokens = (
             (r["input_tokens"] or 0) +
@@ -255,6 +257,7 @@ def get_session_detail(session_id, db_path=None):
             "timestamp_short": (r["timestamp"] or "")[:16].replace("T", " "),
             "model":          r["model"] or "unknown",
             "tool_name":      tool_name,
+            "skill_name":     skill_name,
             "cwd":            cwd,
             "input":          r["input_tokens"] or 0,
             "output":         r["output_tokens"] or 0,
@@ -266,6 +269,10 @@ def get_session_detail(session_id, db_path=None):
         stats = tool_usage.setdefault(tool_name, {"tool_name": tool_name, "turns": 0, "tokens": 0})
         stats["turns"] += 1
         stats["tokens"] += total_tokens
+        if skill_name:
+            sstats = skill_usage.setdefault(skill_name, {"skill_name": skill_name, "turns": 0, "tokens": 0})
+            sstats["turns"] += 1
+            sstats["tokens"] += total_tokens
         cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
 
     conn.close()
@@ -291,6 +298,7 @@ def get_session_detail(session_id, db_path=None):
         "cache_read":       session["total_cache_read"] or 0,
         "cache_creation":   session["total_cache_creation"] or 0,
         "tool_usage":       sorted(tool_usage.values(), key=lambda item: (-item["tokens"], item["tool_name"])),
+        "skill_usage":      sorted(skill_usage.values(), key=lambda item: (-item["tokens"], item["skill_name"])),
         "cwd_usage":        sorted(
             [{"cwd": c, "turns": n} for c, n in cwd_counts.items()],
             key=lambda item: (-item["turns"], item["cwd"])
@@ -497,7 +505,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
      pill list when the list gets long. */
   .detail-grid > div { display: flex; flex-direction: column; gap: 16px; min-height: 0; height: 100%; }
   .detail-grid > div > .detail-card:first-child { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-  .detail-grid > div > .detail-card:last-child { flex: 0 0 auto; }
+  .detail-grid > div > .detail-card:not(:first-child) { flex: 0 0 auto; }
   .detail-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .detail-meta .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
   .detail-meta .value { font-size: 13px; }
@@ -1519,6 +1527,15 @@ function renderSessionDetail(detail) {
       }).join('')
     : '<div class="hint">No tool usage recorded.</div>';
 
+  const maxSkillTokens = Math.max(1, ...(detail.skill_usage || []).map(s => s.tokens || 0));
+  const skillPills = (detail.skill_usage || []).length
+    ? detail.skill_usage.map(s => {
+        const share = (s.tokens || 0) / maxSkillTokens;
+        const cls = share >= 0.6 ? 'heavy' : share >= 0.2 ? 'medium' : 'light';
+        return `<span class="pill ${cls}">${esc(s.skill_name)} · ${fmt(s.tokens)} tok · ${fmt(s.turns)}t</span>`;
+      }).join('')
+    : '<div class="hint">No skill invocations.</div>';
+
   const maxCwdTurns = Math.max(1, ...detail.cwd_usage.map(c => c.turns || 0));
   const cwdPills = detail.cwd_usage.length
     ? detail.cwd_usage.map(c => {
@@ -1566,6 +1583,10 @@ function renderSessionDetail(detail) {
         <div class="detail-card" style="margin-bottom:16px;">
           <h3>Tool Usage</h3>
           <div class="pill-list">${toolPills}</div>
+        </div>
+        <div class="detail-card" style="margin-bottom:16px;">
+          <h3>Skills Used</h3>
+          <div class="pill-list">${skillPills}</div>
         </div>
         <div class="detail-card">
           <h3>Working Directories</h3>
